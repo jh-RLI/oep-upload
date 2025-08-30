@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 from __future__ import annotations
 
 import csv
@@ -12,35 +10,42 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import requests
-
-
 import ast
 
+from config import get_settings, export_env_vars
+
 
 # =========================
-# CONFIG
+# SETTINGS / CONSTANTS
 # =========================
-LOCAL_OEP_URL = "http://127.0.0.1:8000"
-PROD_OEP_URL = "https://openenergyplatform.org"
-BASE_URL = LOCAL_OEP_URL  # switch to PROD_OEP_URL when you want
-REST_API = "/api/v0"
-TOKEN = ""  # put your token here
-HEADER = {"Authorization": f"Token {TOKEN}"}
-DEFAULT_SCHEMA = "model_draft"
 
-# All CSV paths are resolved relative to this folder
-BASE_ROOT = Path("./SLE_data_publication/data/preprocessed/")
-DATA_ROOT = BASE_ROOT / "data"
-OEM_FILE = BASE_ROOT / "datapackage.json"
+_s = get_settings()
+export_env_vars(_s)  # keep legacy env-var consumers happy
 
-BATCH_SIZE = 500
-DRY_RUN = False
-MAX_RETRIES = 5
-RETRY_BASE_DELAY = 1.5
+# Effective endpoint and token / headers
+_API_BASE: str = str(_s.endpoint.api_base_url).rstrip("/") + "/"
+_TIMEOUT: int = int(_s.api.timeout_s)
+_TOKEN: str = _s.effective_api_token or ""
+_HEADER = {"Authorization": f"Token {_TOKEN}"} if _TOKEN else {}
 
-NULL_TOKENS: set[str] = {"", "null", "none", "na", "nan", "n/a"}
+# Upload behavior
+BATCH_SIZE: int = int(_s.upload.batch_size)
+DRY_RUN: bool = bool(_s.upload.dry_run)
+MAX_RETRIES: int = int(_s.upload.max_retries)
+RETRY_BASE_DELAY: float = float(_s.upload.retry_base_delay)
+DEFAULT_SCHEMA: str = _s.upload.default_schema
 
-# Global override map (filled in main)
+# Null tokens
+NULL_TOKENS: set[str] = set(map(lambda s: s.lower(), _s.upload.null_tokens))
+
+# Paths
+ROOT = Path(_s.paths.root).resolve()
+DATA_ROOT = (ROOT / _s.paths.data_dir).resolve()
+OEM_FILE = (
+    (ROOT / _s.paths.datapackage_file).resolve() if _s.paths.datapackage_file else None
+)
+
+# Global override map (filled later)
 RESOURCES_BY_TABLE: dict[str, list["Resource"]] = {}
 
 
@@ -58,19 +63,12 @@ class Resource:
 # SMALL UTILITIES
 # =========================
 def normalize_table_key(name: str) -> str:
-    """
-    Normalize any table identifier to a matching key:
-    - strip whitespace
-    - drop schema (keep bare)
-    - lowercase
-    """
     name = (name or "").strip()
     bare = name.split(".", 1)[-1]
     return bare.lower()
 
 
 def split_ident(ident: str, default_schema: str) -> tuple[str, str]:
-    """Return (schema, table) from 'schema.table' or 'table' (uses default_schema)."""
     ident = ident.strip()
     if "." in ident:
         s, t = ident.split(".", 1)
@@ -83,7 +81,6 @@ def is_url(s: str | None) -> bool:
 
 
 def looks_tabular_path(path: str | None) -> bool:
-    """Accept local CSV/TSV purely by extension; ignore 'format' fields."""
     if not path or is_url(path):
         return False
     p = path.lower()
@@ -103,35 +100,38 @@ def guess_delimiter_from_path(path: str | None) -> str:
 
 def resolve_csv_path(raw: str) -> Path:
     """
-    Robust path resolution:
-    - If absolute and exists -> use it.
-    - If absolute but missing -> try DATA_ROOT/<raw.lstrip('/')>.
-    - If relative -> DATA_ROOT/<raw>.
+    Resolution:
+    - absolute & exists -> use it
+    - relative -> DATA_ROOT/<raw>
     """
     raw_path = Path(raw)
     if raw_path.is_absolute():
-        return (
-            raw_path
-            if raw_path.exists()
-            else (DATA_ROOT / raw_path.name if raw_path.name else DATA_ROOT)
-        )
+        return raw_path
     return (DATA_ROOT / raw_path).resolve()
+
+
+def _join_api(*parts: str) -> str:
+    # Build URLs like <api_base>/schema/<schema>/tables/<table>/...
+    suffix = "/".join(p.strip("/") for p in parts if p is not None)
+    return f"{_API_BASE}{suffix}"
 
 
 # =========================
 # API
 # =========================
 def api_get(url: str) -> dict:
-    r = requests.get(url, headers=HEADER, timeout=60)
+    r = requests.get(url, headers=_HEADER, timeout=_TIMEOUT)
     r.raise_for_status()
     return r.json()
 
 
 def post_rows(schema: str, table: str, rows: list[dict]) -> tuple[int, dict]:
-    url = f"{BASE_URL}{REST_API}/schema/{schema}/tables/{table}/rows/new"
+    url = _join_api("schema", schema, "tables", table, "rows", "new")
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = requests.post(url, headers=HEADER, json={"query": rows}, timeout=120)
+            resp = requests.post(
+                url, headers=_HEADER, json={"query": rows}, timeout=max(120, _TIMEOUT)
+            )
             status = resp.status_code
             try:
                 payload = resp.json()
@@ -149,11 +149,11 @@ def post_rows(schema: str, table: str, rows: list[dict]) -> tuple[int, dict]:
 
 
 def get_table_info(schema: str, table: str) -> dict:
-    return api_get(f"{BASE_URL}{REST_API}/schema/{schema}/tables/{table}/")
+    return api_get(_join_api("schema", schema, "tables", table))
 
 
 def get_table_meta(schema: str, table: str) -> dict:
-    return api_get(f"{BASE_URL}{REST_API}/schema/{schema}/tables/{table}/meta/")
+    return api_get(_join_api("schema", schema, "tables", table, "meta"))
 
 
 # =========================
@@ -163,7 +163,7 @@ def load_oem_resources(oem_path: Path) -> dict[str, list[Resource]]:
     """
     Parse datapackage/OEM file and return:
       { <normalized bare table>: [Resource(...), ...] }
-    Only local CSV/TSV (by extension) are included. Delimiter falls back to extension.
+    Only local CSV/TSV are included. Delimiter falls back to extension.
     """
     with oem_path.open("r", encoding="utf-8") as f:
         meta = json.load(f)
@@ -193,26 +193,30 @@ def load_oem_resources(oem_path: Path) -> dict[str, list[Resource]]:
 
 def find_datapackage() -> Path | None:
     """
-    Discover datapackage.json via:
-      1) env OEP_OEM_FILE
-      2) CWD/datapackage.json
-      3) script_dir/datapackage.json
-      4) script_dir.parent/datapackage.json
-      5) DATA_ROOT/datapackage.json (legacy default)
-    Returns the first that exists, else None.
+    Discovery priority:
+      1) env OEP_OEM_FILE (if present)
+      2) config.paths.datapackage_file (if provided)
+      3) CWD/datapackage.json
+      4) ROOT/datapackage.json
+      5) DATA_ROOT/datapackage.json
     """
+    env_hint = (
+        (Path.cwd() / (os.environ.get("OEP_OEM_FILE") or "")).resolve()
+        if "OEP_OEM_FILE" in os.environ
+        else None
+    )
+    candidates: list[Path] = []
+    if env_hint and env_hint.name:
+        candidates.append(env_hint)
+    if OEM_FILE:
+        candidates.append(OEM_FILE)
+    candidates.append(Path.cwd() / "datapackage.json")
+    candidates.append(ROOT / "datapackage.json")
+    candidates.append(DATA_ROOT / "datapackage.json")
 
-    # candidates: list[Path] = []
-    # cwd = Path.cwd()
-    # script_dir = Path(__file__).resolve().parent
-
-    # candidates.append(cwd / "datapackage.json")
-    # candidates.append(script_dir / "datapackage.json")
-    # candidates.append(script_dir.parent / "datapackage.json")
-    # candidates.append(DATA_ROOT / "datapackage.json")
-
-    if OEM_FILE.exists():
-        return OEM_FILE
+    for c in candidates:
+        if c and c.exists():
+            return c
     return None
 
 
@@ -220,12 +224,11 @@ def find_tabulars_in_meta(meta_dict: dict) -> list[Resource]:
     """
     Extract tabular resources from a table's /meta/:
       returns [Resource(...), ...]
-    Prefers meta['resources']; falls back to deep-scan for any local *.csv/*.tsv path.
+    Prefers meta['resources']; falls back to deep-scan.
     """
     results: list[Resource] = []
 
-    # Prefer explicit resources list
-    res_list = meta_dict["resources"]
+    res_list = meta_dict.get("resources")
     if isinstance(res_list, list):
         for res in res_list:
             if not isinstance(res, dict):
@@ -238,7 +241,6 @@ def find_tabulars_in_meta(meta_dict: dict) -> list[Resource]:
             encoding = res.get("encoding") or dialect.get("encoding")
             results.append(Resource(path=path, delimiter=delimiter, encoding=encoding))
 
-    # Deep-scan if nothing found
     if not results:
 
         def walk(obj: Any) -> None:
@@ -260,7 +262,6 @@ def find_tabulars_in_meta(meta_dict: dict) -> list[Resource]:
 
         walk(meta_dict)
 
-    # Dedup by path (preserve order)
     seen: set[str] = set()
     uniq: list[Resource] = []
     for r in results:
@@ -280,37 +281,25 @@ def stream_csv_rows(
     delim = delimiter if (isinstance(delimiter, str) and len(delimiter) == 1) else ","
     with csv_path.open("r", newline="", encoding=enc) as f:
         reader = csv.DictReader(f, delimiter=delim)
-        for i, row in enumerate(reader, 1):
-            yield row  # we don't need the line number anymore
+        for row in reader:
+            yield row
 
 
 # =========================
 # PASS-THROUGH MAPPER
 # =========================
-
-# e.g. NULL_TOKENS = {"", "null", "none", "na", "n/a", "nan"}
-# make sure it's defined somewhere above
-
-
 def _parse_composite_string(s: str) -> Any:
-    """
-    If s looks like a list or dict written as a string, parse it.
-    Tries JSON first, then ast.literal_eval. Returns original string on failure.
-    """
     txt = s.strip()
     if not txt:
         return s
     if (txt[0], txt[-1]) not in {("[", "]"), ("{", "}")}:
         return s
-    # Try strict JSON first
     try:
         return json.loads(txt)
     except json.JSONDecodeError:
         pass
-    # Fall back to safe Python literal evaluation (handles single quotes)
     try:
         val = ast.literal_eval(txt)
-        # Only accept list/dict results; otherwise leave it as-is
         if isinstance(val, (list, dict)):
             return val
     except (ValueError, SyntaxError):
@@ -328,18 +317,15 @@ def convert_row_passthrough(
     for col in column_names:
         v = row.get(col)
 
-        # normalize explicit null-like strings
         if isinstance(v, str):
             s = v.strip()
             if s.lower() in NULL_TOKENS:
                 v = None
             else:
-                # convert string-wrapped lists/dicts
                 v = _parse_composite_string(s)
 
         out[col] = v
 
-    # enforce NOT NULL (skip 'id' if serial/identity)
     for col in required_nonnull:
         if out.get(col) is None:
             raise ValueError(f"column {col} is NOT NULL but value is missing/NULL")
@@ -357,21 +343,16 @@ def upload_table(
     schema: str, table: str, resources_override: list[Resource] | None = None
 ) -> None:
     """
-    Source priority (as requested):
-      1) explicit resources_override (from local datapackage.json),
-      2) global RESOURCES_BY_TABLE lookup (also from datapackage.json),
-      3) fallback to /meta/ discovery.
+    Source priority:
+      1) explicit resources_override,
+      2) global RESOURCES_BY_TABLE,
+      3) /meta/ discovery.
     """
     bare_key = normalize_table_key(table)
 
-    # 1) explicit override wins if non-empty
     tabulars: list[Resource] = resources_override or []
-
-    # 2) global mapping (if explicit was empty)
     if not tabulars and RESOURCES_BY_TABLE:
         tabulars = RESOURCES_BY_TABLE.get(bare_key, [])
-
-    # 3) fallback to /meta/ only if we still have nothing
     if not tabulars:
         meta = get_table_meta(schema, table)
         tabulars = find_tabulars_in_meta(meta)
@@ -386,7 +367,6 @@ def upload_table(
         c for c, d in columns.items() if not d.get("is_nullable", True)
     }
 
-    # serial/identity 'id' detection (omit when None)
     serial_pk = False
     if "id" in columns:
         coldef = columns["id"] or {}
@@ -407,7 +387,8 @@ def upload_table(
             raise FileNotFoundError(f"CSV not found: {csv_path}")
 
         print(
-            f"\nProcessing {table} from {csv_path} (delimiter='{res.delimiter or ','}', encoding='{res.encoding or 'utf-8-sig'}')"
+            f"\nProcessing {table} from {csv_path} "
+            f"(delimiter='{res.delimiter or ','}', encoding='{res.encoding or 'utf-8-sig'}')"
         )
 
         batch: list[dict] = []
@@ -417,7 +398,6 @@ def upload_table(
                     raw_row, column_names, required_nonnull, serial_pk
                 )
             except Exception as e:
-                # Show head of row for easier debugging
                 snippet = {k: raw_row.get(k) for k in column_names[:10]}
                 raise RuntimeError(
                     f"Row conversion error in {csv_path.name}: {e}\n"
@@ -473,9 +453,6 @@ def fk_parents_for_table(schema: str, table: str) -> set[str]:
 
 
 def topo_sort_tables(idents: list[str], default_schema: str) -> list[str]:
-    """
-    Accept a list of 'table' or 'schema.table'. Return **bare table names** in parents-first order.
-    """
     nodes_fq = []
     for ident in idents:
         s, t = split_ident(ident, default_schema)
@@ -508,7 +485,6 @@ def topo_sort_tables(idents: list[str], default_schema: str) -> list[str]:
         cycle = [n for n in nodes_fq if indeg[n] > 0]
         raise RuntimeError(f"FK cycle or missing external parents among: {cycle}")
 
-    # Return bare table names
     return [n.split(".", 1)[1] for n in order_fq]
 
 
@@ -520,12 +496,10 @@ def upload_tables_in_fk_order(
     ordered_tables = topo_sort_tables(idents, default_schema)
     print("Upload order (parents -> children):", " -> ".join(ordered_tables))
 
-    # Normalize overrides to bare, lowercase keys for matching
     global RESOURCES_BY_TABLE
     raw_map = resources_by_table or {}
     RESOURCES_BY_TABLE = {normalize_table_key(k): v for k, v in raw_map.items()}
 
-    # helpful visibility
     if RESOURCES_BY_TABLE:
         print(f"[override keys] {sorted(RESOURCES_BY_TABLE.keys())}")
 
@@ -541,26 +515,27 @@ def upload_tables_in_fk_order(
 
 
 # =========================
-# Main
+# Entrypoint helper (optional)
 # =========================
-# TODO Streamline csv reading -> once function, easy to use, good path reading
-if __name__ == "__main__":
+def run_from_oem() -> None:
+    """
+    Convenience entry: read datapackage from config/env,
+    derive tables, and upload in FK order.
+    """
     resources_by_table: dict[str, list[Resource]] | None = None
     tables_input: list[str] = []
-    resources_by_table = load_oem_resources(OEM_FILE)
-    if OEM_FILE.exists():
-        resources_by_table = load_oem_resources(OEM_FILE)
-        tables_input = list(resources_by_table.keys())  # already bare+normalized keys
-        print(f"Found {len(tables_input)} tables in OEM file: {OEM_FILE}")
+
+    oem_path = find_datapackage()
+    if oem_path and oem_path.exists():
+        resources_by_table = load_oem_resources(oem_path)
+        tables_input = list(resources_by_table.keys())
+        print(f"Found {len(tables_input)} tables in OEM file: {oem_path}")
     else:
-        # Manual list (can mix 'table' and 'schema.table')
-        tables_input = [
-            "open_modex_bsf_scalar",
-        ]
+        raise SystemExit(
+            "No datapackage found. Set 'paths.datapackage_file' or OEP_OEM_FILE."
+        )
 
     if not tables_input:
-        raise SystemExit(
-            "No tables to upload. Check your OEM file or specify tables manually."
-        )
+        raise SystemExit("No tables to upload. Check your OEM file.")
 
     upload_tables_in_fk_order(tables_input, DEFAULT_SCHEMA, resources_by_table)
