@@ -1,0 +1,15 @@
+data/**/*.csv
+data/**/*.xlsx
+data/**/*.json
+
+.venv/
+
+__pycache__/
+*.pyc
+.ipynb_checkpoints
+.vscode/settings.json
+.idea/
+.DS_Store
+
+.env
+
