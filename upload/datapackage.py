@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import csv
 import json
 import re
@@ -196,9 +197,10 @@ def find_datapackage() -> Path | None:
     Discovery priority:
       1) env OEP_OEM_FILE (if present)
       2) config.paths.datapackage_file (if provided)
-      3) CWD/datapackage.json
-      4) ROOT/datapackage.json
-      5) DATA_ROOT/datapackage.json
+      ---- Deactivated for now ----
+      3) DATA_ROOT/datapackage.json
+      4) CWD/datapackage.json
+      5) ROOT/datapackage.json
     """
     env_hint = (
         (Path.cwd() / (os.environ.get("OEP_OEM_FILE") or "")).resolve()
@@ -210,9 +212,9 @@ def find_datapackage() -> Path | None:
         candidates.append(env_hint)
     if OEM_FILE:
         candidates.append(OEM_FILE)
-    candidates.append(Path.cwd() / "datapackage.json")
-    candidates.append(ROOT / "datapackage.json")
-    candidates.append(DATA_ROOT / "datapackage.json")
+    # candidates.append(DATA_ROOT / "datapackage.json")
+    # candidates.append(Path.cwd() / "datapackage.json")
+    # candidates.append(ROOT / "datapackage.json")
 
     for c in candidates:
         if c and c.exists():
