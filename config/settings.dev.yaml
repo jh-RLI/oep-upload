@@ -1,0 +1,4 @@
+app:
+  log_level: DEBUG
+api:
+  target: local

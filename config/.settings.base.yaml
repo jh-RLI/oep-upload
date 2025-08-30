@@ -1,0 +1,26 @@
+app:
+  name: oep-uploader
+  timezone: Europe/Berlin
+  log_level: INFO
+
+api:
+  timeout_s: 30
+  target: remote   # remote | local
+
+  remote:
+    host: openenergyplatform.org
+    api_base_url: https://openenergyplatform.org/api/v0/
+    protocol: https
+
+  local:
+    host: localhost:8000
+    api_base_url: http://localhost:8000/api/v0/
+    protocol: http
+
+oep:
+  user: Jonas.Huber
+
+paths:
+  root: .
+  data_dir: data
+  datapackage_file: data/datapackages/example/oed_example.json

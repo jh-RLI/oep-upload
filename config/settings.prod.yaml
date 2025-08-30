@@ -1,0 +1,4 @@
+app:
+  log_level: INFO
+api:
+  target: remote
