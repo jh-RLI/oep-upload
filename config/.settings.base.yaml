@@ -19,6 +19,7 @@ api:
 
 oep:
   user: Jonas.Huber
+  # Either provide a token here or in the .env file as OEP_API_TOKEN
 
 paths:
   root: .
