@@ -28,6 +28,5 @@ if __name__ == "__main__":
     )
     # ... rest of your program ...
 
-
-path = Path("datapackages/example/")
-create_tables_on_oedb(path)
+    path = Path("datapackages/example/")
+    create_tables_on_oedb(path)
