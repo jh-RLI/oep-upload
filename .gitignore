@@ -13,3 +13,4 @@ __pycache__/
 
 .env
 
+oep_upload.egg-info

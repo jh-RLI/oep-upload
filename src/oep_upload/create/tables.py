@@ -1,7 +1,11 @@
 from pathlib import Path
 from oem2orm import oep_oedialect_oem2orm as oem2orm
-from ..config import settings
+
+from oep_upload.config import get_settings, export_env_vars
 import pathlib
+
+settings = get_settings()
+export_env_vars(settings)
 
 
 def create_tables_on_oedb(metadata_folder_name: Path):
@@ -12,9 +16,9 @@ def create_tables_on_oedb(metadata_folder_name: Path):
                                     must be part of the current directory.
     """
     db = oem2orm.setup_db_connection(
-        host=settings.OEP_URL,
-        user=settings.OEP_USER,
-        token=settings.OEP_API_TOKEN,
+        host=settings.api.local.host,
+        user=settings.oep_user,
+        token=settings.oep_api_token_local,
     )
     folder = pathlib.Path.cwd() / metadata_folder_name
     tables = oem2orm.collect_tables_from_oem_files(db, folder)
@@ -27,5 +31,15 @@ def create_tables_on_oedb(metadata_folder_name: Path):
 
 
 if __name__ == "__main__":
-    path = Path("datapackages/example/")
+
+    ROOT = Path(settings.paths.root).resolve()
+    DATA_ROOT = (ROOT / settings.paths.data_dir).resolve()
+    OEM_FILE = (
+        (DATA_ROOT / settings.paths.datapackage_file).resolve()
+        if settings.paths.datapackage_file
+        else None
+    )
+
+    path = Path(DATA_ROOT)
+    print(path)
     create_tables_on_oedb(path)

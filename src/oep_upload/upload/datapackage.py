@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import os
-import csv
 import json
 import re
-import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,8 +11,16 @@ from typing import Any, Iterable
 import requests
 import ast
 
-from config import get_settings, export_env_vars
+from oep_upload.config import get_settings, export_env_vars
 
+import gzip
+import bz2
+import lzma
+
+import pyarrow as pa
+import pyarrow.csv as pacsv
+
+from oep_upload.api.oep import TablesService, OEPApiClient
 
 # =========================
 # SETTINGS / CONSTANTS
@@ -22,12 +28,6 @@ from config import get_settings, export_env_vars
 
 _s = get_settings()
 export_env_vars(_s)  # keep legacy env-var consumers happy
-
-# Effective endpoint and token / headers
-_API_BASE: str = str(_s.endpoint.api_base_url).rstrip("/") + "/"
-_TIMEOUT: int = int(_s.api.timeout_s)
-_TOKEN: str = _s.effective_api_token or ""
-_HEADER = {"Authorization": f"Token {_TOKEN}"} if _TOKEN else {}
 
 # Upload behavior
 BATCH_SIZE: int = int(_s.upload.batch_size)
@@ -43,11 +43,14 @@ NULL_TOKENS: set[str] = set(map(lambda s: s.lower(), _s.upload.null_tokens))
 ROOT = Path(_s.paths.root).resolve()
 DATA_ROOT = (ROOT / _s.paths.data_dir).resolve()
 OEM_FILE = (
-    (ROOT / _s.paths.datapackage_file).resolve() if _s.paths.datapackage_file else None
+    (DATA_ROOT / _s.paths.datapackage_file).resolve()
+    if _s.paths.datapackage_file
+    else None
 )
 
 # Global override map (filled later)
 RESOURCES_BY_TABLE: dict[str, list["Resource"]] = {}
+_TABLES = TablesService(OEPApiClient.from_settings())
 
 
 # =========================
@@ -111,52 +114,6 @@ def resolve_csv_path(raw: str) -> Path:
     return (DATA_ROOT / raw_path).resolve()
 
 
-def _join_api(*parts: str) -> str:
-    # Build URLs like <api_base>/schema/<schema>/tables/<table>/...
-    suffix = "/".join(p.strip("/") for p in parts if p is not None)
-    return f"{_API_BASE}{suffix}"
-
-
-# =========================
-# API
-# =========================
-def api_get(url: str) -> dict:
-    r = requests.get(url, headers=_HEADER, timeout=_TIMEOUT)
-    r.raise_for_status()
-    return r.json()
-
-
-def post_rows(schema: str, table: str, rows: list[dict]) -> tuple[int, dict]:
-    url = _join_api("schema", schema, "tables", table, "rows", "new")
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            resp = requests.post(
-                url, headers=_HEADER, json={"query": rows}, timeout=max(120, _TIMEOUT)
-            )
-            status = resp.status_code
-            try:
-                payload = resp.json()
-            except Exception:
-                payload = {"raw": resp.text}
-            if status >= 500:
-                raise RuntimeError(f"Server {status}: {payload}")
-            return status, payload
-        except Exception as e:
-            if attempt == MAX_RETRIES:
-                raise
-            delay = RETRY_BASE_DELAY**attempt
-            print(f"POST retry {attempt}/{MAX_RETRIES} in {delay:.1f}s due to: {e}")
-            time.sleep(delay)
-
-
-def get_table_info(schema: str, table: str) -> dict:
-    return api_get(_join_api("schema", schema, "tables", table))
-
-
-def get_table_meta(schema: str, table: str) -> dict:
-    return api_get(_join_api("schema", schema, "tables", table, "meta"))
-
-
 # =========================
 # OEMetadata / datapackage
 # =========================
@@ -183,9 +140,13 @@ def load_oem_resources(oem_path: Path) -> dict[str, list[Resource]]:
             continue
 
         dialect = res.get("dialect") if isinstance(res.get("dialect"), dict) else {}
-        delimiter = dialect.get("delimiter") or guess_delimiter_from_path(path)
-        encoding = res.get("encoding") or dialect.get("encoding")
-
+        if dialect:
+            delimiter = dialect.get("delimiter") or guess_delimiter_from_path(path)
+            encoding = res.get("encoding") or dialect.get("encoding")
+        else:
+            raise Exception(
+                f"Resource {path} for table {table_name} missing dialect info to read the CSV data."
+            )
         key = normalize_table_key(table_name)
         out[key].append(Resource(path=path, delimiter=delimiter, encoding=encoding))
 
@@ -276,15 +237,93 @@ def find_tabulars_in_meta(meta_dict: dict) -> list[Resource]:
 # =========================
 # CSV streaming
 # =========================
-def stream_csv_rows(
-    csv_path: Path, delimiter: str | None, encoding: str | None
-) -> Iterable[dict[str, Any]]:
-    enc = encoding or "utf-8-sig"
+
+
+def _open_binary_any(path: Path):
+    """
+    Open file as binary, transparently handling common compression formats.
+    (Decompression happens in Python here. For maximum throughput, provide
+    uncompressed CSVs when possible.)
+    """
+    p = str(path).lower()
+    if p.endswith(".gz"):
+        return gzip.open(path, "rb")
+    if p.endswith(".bz2") or p.endswith(".bzip2"):
+        return bz2.open(path, "rb")
+    if p.endswith(".xz") or p.endswith(".lzma"):
+        return lzma.open(path, "rb")
+    return path.open("rb")
+
+
+def stream_csv_batches(
+    csv_path: Path,
+    delimiter: str | None,
+    encoding: str | None,
+    include_columns: list[str],
+    batch_size: int,
+) -> Iterable[list[dict[str, Any]]]:
+    """
+    Stream CSV as batches of dicts using PyArrow only.
+    - Respects delimiter, encoding, and NULL tokens.
+    - Yields lists of rows sized up to `batch_size` for POSTing.
+    """
     delim = delimiter if (isinstance(delimiter, str) and len(delimiter) == 1) else ","
-    with csv_path.open("r", newline="", encoding=enc) as f:
-        reader = csv.DictReader(f, delimiter=delim)
-        for row in reader:
-            yield row
+    enc = encoding or "utf8"  # Arrow canonical name
+
+    read_opts = pacsv.ReadOptions(
+        block_size=1 << 20,  # 1 MiB blocks; tune if needed
+        encoding=enc,
+        autogenerate_column_names=False,
+    )
+    parse_opts = pacsv.ParseOptions(
+        delimiter=delim,
+        newlines_in_values=True,
+    )
+    convert_opts = pacsv.ConvertOptions(
+        include_columns=include_columns or None,
+        null_values=list(NULL_TOKENS) if NULL_TOKENS else None,
+        strings_can_be_null=True,
+    )
+
+    # Use path directly for uncompressed; wrap compressed in a binary stream
+    lower = str(csv_path).lower()
+    compressed = lower.endswith((".gz", ".bz2", ".bzip2", ".xz", ".lzma"))
+    if compressed:
+        fbin = _open_binary_any(csv_path)
+        source = pa.input_stream(fbin)
+    else:
+        source = str(csv_path)
+        fbin = None
+
+    reader = pacsv.open_csv(
+        source,
+        read_options=read_opts,
+        parse_options=parse_opts,
+        convert_options=convert_opts,
+    )
+    try:
+        while True:
+            rb = reader.read_next_batch()
+            if rb is None or rb.num_rows == 0:
+                break
+
+            rows = rb.to_pylist()  # list[dict], required for JSON POST + your mapper
+
+            if batch_size and batch_size > 0 and len(rows) > batch_size:
+                for i in range(0, len(rows), batch_size):
+                    yield rows[i : i + batch_size]
+            else:
+                yield rows
+    finally:
+        try:
+            reader.close()
+        except Exception:
+            pass
+        if fbin is not None:
+            try:
+                fbin.close()
+            except Exception:
+                pass
 
 
 # =========================
@@ -356,13 +395,13 @@ def upload_table(
     if not tabulars and RESOURCES_BY_TABLE:
         tabulars = RESOURCES_BY_TABLE.get(bare_key, [])
     if not tabulars:
-        meta = get_table_meta(schema, table)
+        meta = _TABLES.get_table_meta(schema, table)
         tabulars = find_tabulars_in_meta(meta)
 
     if not tabulars:
         raise RuntimeError(f"No local tabular paths found for {table}")
 
-    info = get_table_info(schema, table)
+    info = _TABLES.get_table_info(schema, table)
     columns: dict[str, dict] = info["columns"]
     column_names = list(columns.keys())
     required_nonnull: set[str] = {
@@ -377,7 +416,7 @@ def upload_table(
             serial_pk = True
             required_nonnull.discard("id")
 
-    total_rows = 0
+        total_rows = 0
     if len(tabulars) > 1:
         print(
             f"Note: multiple tabular paths found for {table}: {[t.path for t in tabulars]}"
@@ -390,39 +429,37 @@ def upload_table(
 
         print(
             f"\nProcessing {table} from {csv_path} "
-            f"(delimiter='{res.delimiter or ','}', encoding='{res.encoding or 'utf-8-sig'}')"
+            f"(delimiter='{res.delimiter or ','}', encoding='{res.encoding or 'utf-8'}')"
         )
 
-        batch: list[dict] = []
-        for raw_row in stream_csv_rows(csv_path, res.delimiter, res.encoding):
-            try:
-                mapped = convert_row_passthrough(
-                    raw_row, column_names, required_nonnull, serial_pk
-                )
-            except Exception as e:
-                snippet = {k: raw_row.get(k) for k in column_names[:10]}
-                raise RuntimeError(
-                    f"Row conversion error in {csv_path.name}: {e}\n"
-                    f"Row head: {json.dumps(snippet, ensure_ascii=False)[:300]}..."
-                ) from e
+        for raw_batch in stream_csv_batches(
+            csv_path,
+            res.delimiter,
+            res.encoding,
+            column_names,
+            BATCH_SIZE,
+        ):
+            batch: list[dict] = []
+            for raw_row in raw_batch:
+                try:
+                    mapped = convert_row_passthrough(
+                        raw_row, column_names, required_nonnull, serial_pk
+                    )
+                except Exception as e:
+                    snippet = {k: raw_row.get(k) for k in column_names[:10]}
+                    raise RuntimeError(
+                        f"Row conversion error in {csv_path.name}: {e}\n"
+                        f"Row head: {json.dumps(snippet, ensure_ascii=False)[:300]}..."
+                    ) from e
+                batch.append(mapped)
 
-            batch.append(mapped)
-            if len(batch) >= BATCH_SIZE:
-                if DRY_RUN:
-                    print(f"DRY_RUN: would POST batch of {len(batch)} rows")
-                else:
-                    status, payload = post_rows(schema, table, batch)
-                    if status not in (200, 201, 202):
-                        raise RuntimeError(f"POST failed: {status} {payload}")
-                    print(f"Uploaded {len(batch)} rows -> status {status}")
-                total_rows += len(batch)
-                batch = []
+            if not batch:
+                continue
 
-        if batch:
             if DRY_RUN:
-                print(f"DRY_RUN: would POST final batch of {len(batch)} rows")
+                print(f"DRY_RUN: would POST batch of {len(batch)} rows")
             else:
-                status, payload = post_rows(schema, table, batch)
+                status, payload = _TABLES.post_rows(schema, table, batch)
                 if status not in (200, 201, 202):
                     raise RuntimeError(f"POST failed: {status} {payload}")
                 print(f"Uploaded {len(batch)} rows -> status {status}")
@@ -441,7 +478,7 @@ FK_DEF_RE = re.compile(
 
 
 def fk_parents_for_table(schema: str, table: str) -> set[str]:
-    info = get_table_info(schema, table)
+    info = _TABLES.get_table_info(schema, table)
     parents: set[str] = set()
     for _, c in (info.get("constraints") or {}).items():
         if (c.get("constraint_type") or "").upper() == "FOREIGN KEY":
@@ -519,7 +556,7 @@ def upload_tables_in_fk_order(
 # =========================
 # Entrypoint helper (optional)
 # =========================
-def run_from_oem() -> None:
+def upload_tabular_data() -> None:
     """
     Convenience entry: read datapackage from config/env,
     derive tables, and upload in FK order.

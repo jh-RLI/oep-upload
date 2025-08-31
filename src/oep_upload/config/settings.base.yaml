@@ -5,7 +5,7 @@ app:
 
 api:
   timeout_s: 30
-  target: remote   # remote | local
+  target: local   # remote | local
 
   remote:
     host: openenergyplatform.org
@@ -23,5 +23,5 @@ oep:
 
 paths:
   root: .
-  data_dir: data
-  datapackage_file: data/datapackages/example/oed_example.json
+  data_dir: data/preprocessed
+  datapackage_file: data/datapackages/preprocessed/datapackage.json

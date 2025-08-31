@@ -1,11 +1,12 @@
 from pathlib import Path
 
-from create.tables import create_tables_on_oedb
+from oep_upload.create.tables import create_tables_on_oedb
+from oep_upload.upload.datapackage import upload_tabular_data
 
 import logging
 import logging.config
 import yaml
-from config import get_settings, export_env_vars
+from oep_upload.config import get_settings, export_env_vars
 
 
 def setup_logging():
@@ -30,3 +31,4 @@ if __name__ == "__main__":
 
     path = Path("datapackages/example/")
     create_tables_on_oedb(path)
+    upload_tabular_data()

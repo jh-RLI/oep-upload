@@ -48,7 +48,7 @@ class UploadSettings(BaseModel):
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=None,
         env_nested_delimiter="__",
         extra="ignore",
     )
@@ -70,7 +70,9 @@ class Settings(BaseSettings):
     @property
     def effective_api_token(self) -> Optional[str]:
         if self.api.target == "local":
-            return self.oep_api_token_local or self.oep_api_token
+            return self.oep_api_token_local
+        if self.api.target == "production":
+            return self.oep_api_token
         return self.oep_api_token
 
     @property
