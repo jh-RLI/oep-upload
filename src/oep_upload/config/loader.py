@@ -136,5 +136,6 @@ def export_env_vars(s: Settings) -> None:
     os.environ["OEP_API_URL"] = str(s.endpoint.api_base_url)
     os.environ["OEP_URL"] = s.endpoint.host
     os.environ["OEDIALECT_PROTOCOL"] = s.oedialect_protocol
+    os.environ["OEP_OEM_FILE"] = s.paths.datapackage_file or ""
     if s.oep_user:
         os.environ["OEP_USER"] = s.oep_user
