@@ -36,11 +36,13 @@ Experimental tool to handle the full use case of data uploads to the oeplatform:
 
 You are supposed to pip install (once available) / clone this repo and import its functionality or simply run the main.py file after you completed the setup steps to make all oep-access credentials and the dataset source as well as oemetadata available and readable by the tool.
 
-If you wonder where to put your data you can find a "data" directory where you drop you unzipped folder. In most scenarios there is a directory with the dataset name or acronym. Then below a datapackage.json (which is the oemetadata JSON file) and then a data directory (in case of multiple files) which can include further sub directories to organize the data. In simple cases you might just put the data file next to the json file. Other resources are also allowed but until now they are more or less ignored by the functionality of this tool. To make the upload work it is important to use the wide format of data and comply with the OEP as described in the Setup steps. Here might be questions on how to do that, please just reach out via issue to discuss you case.
+If you wonder where to put your data you can find a "data" directory where you drop you unzipped folder. In most scenarios there should then be a directory with the dataset name or acronym. Then in that directory a datapackage.json (which is the oemetadata JSON file) and then a data directory (in case of multiple files) which can include further sub directories to organize the data must be present. In simple cases you might just put the data file next to the json file. Other resources are also allowed but until now they are more or less ignored by the functionality of this tool. To make the upload work it is important to use the wide format of data and comply with the OEP as described in the Setup steps. Here might be questions on how to do that, please just reach out via issue to discuss you case. The relative paths to each data file must be mentioned in the datapackage.json for each resource - this ensures the tool can create a table and then also find the data which is supposed to be uploaded to that specific table.
 
-Find a file called "config.json" and provide you credentials !!Dont commit!! Production is our public OEP instance which is running at openenergyplatform.org.
+You can also set further settings in `config.settings.base.yaml` if things dont work as expected have a look there and configure the `data_dir` and `datapackage_file` variables. I admit setting the correct paths might still be challenging as you have to be careful with leading and trailing "/". Just reach out via Issue so i can assist with that until i made it more stable. 
 
-Run the main.py file with an installed python environment. I suggest to first install the package manager ["uv"](https://docs.astral.sh/uv/) on you system and then use it to install this tool. After that you just run the script or import its functionality to create automation pipelines. (Code is documentation for now ... )
+Find a file called ".env.example", copy it and name it .env. In that file you find multiple variable where you can provide specific info. Please provide your credentials that can be used with the api endpoint you use. In any chase that will be the oeplatoform and there you can find your API token in your Profile settings. !!Don´t commit production credentials!! Production is our public OEP instance which is running at openenergyplatform.org.
+
+Run the main.py file with an installed python environment. I suggest to first install the package manager ["uv"](https://docs.astral.sh/uv/) on you system and then use it to install this tool. After that you just run the script or import its functionality to create automation pipelines.
 
 ## Limitations & Disclaimer
 
@@ -54,26 +56,13 @@ Please also note that the tool might change your table and column names if they 
 
 So far this tool was tested with GB´s of data not big data. The CSV engine is implemented using PyArrow which can handle large volumes of data. Keep in mind that the oep upload is done via the Internet using a REST-API which relies on HTTP 1.1. In my case study uploading 2GB of data (scalar and timeseries) into multiple Tables took about 30 minutes. There might be possibilities to enhance that using parallel requests still this is basically the bottle neck due to technology constrains.
 
-## Quick start
 
-You can upload an example datapackage to the OEP if you are already registered there. You can register on openenergyplatform.org and then get you credentials from you profile pages.
-
-Using the example settings in your .env file as well as tool settings you can use the commands in your terminal.
-
-```bash
-
-# i suggest you to use the tool "uv" which you first have to install. It will handle managing python versions and python environments as well as dependencies flawlessly (from my experience everything just installs without issue) You can still use other solutions which can work with the .toml file.
-
-ENV=dev uv run python main.py         # uses local endpoint
-ENV=prod uv run python main.py        # uses remote endpoint
-```
 
 ## Install from source for development or local usage
 
+Recommended: Install uv
 
-Optional: Install uv
-
-Read up here <https://docs.astral.sh/uv/getting-started/installation/#__tabbed_1_2>. As always things are easy to setup on Linux systems. On windows you have to do some extra steps. While uv is a nice tool which helps a lot it still requires some understanding how to setup python applications. If you have major issues getting that done you can always reach out via Issue here in this repo. 
+Read up here <https://docs.astral.sh/uv/getting-started/installation/#__tabbed_1_2>. As always things are easy to setup on Linux systems. On windows you have to do some extra steps. While uv is a nice tool which helps a lot it still requires some understanding how to setup python applications. If you have major issues getting that done you can always reach out via Issue here in this repo.
 
 Install the tool from source:
 
