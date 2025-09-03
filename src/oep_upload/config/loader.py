@@ -131,6 +131,7 @@ def get_settings(
 
 
 def export_env_vars(s: Settings) -> None:
+    os.environ["ENV"] = s.env
     os.environ["OEP_API_TOKEN"] = s.effective_api_token or ""
     os.environ["OEP_API_TOKEN_LOCAL"] = s.effective_api_token or ""
     os.environ["OEP_API_URL"] = str(s.endpoint.api_base_url)
