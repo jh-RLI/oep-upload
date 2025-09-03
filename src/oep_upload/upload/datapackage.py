@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-import requests
+
+import oem2orm
+import oem2orm.normalizer
 import ast
 
 from oep_upload.config import get_settings, export_env_vars
@@ -21,11 +23,12 @@ import pyarrow as pa
 import pyarrow.csv as pacsv
 
 from oep_upload.api.oep import TablesService, OEPApiClient
+from oep_upload.config.logging import setup_logging
 
 # =========================
 # SETTINGS / CONSTANTS
 # =========================
-
+loggi = setup_logging()
 _s = get_settings()
 export_env_vars(_s)  # keep legacy env-var consumers happy
 
@@ -61,6 +64,8 @@ class Resource:
     path: str
     delimiter: str | None = None
     encoding: str | None = None
+    csv_fields: list[str] | None = None
+    db_columns: list[str] | None = None
 
 
 # =========================
@@ -91,10 +96,10 @@ def looks_tabular_path(path: str | None) -> bool:
     return p.endswith(".csv") or p.endswith(".tsv")
 
 
-def guess_delimiter_from_path(path: str | None) -> str:
+def guess_delimiter_from_path(path: Path | None) -> str:
     if not path:
         return ","
-    p = path.lower()
+    p = path.__str__().lower()
     if p.endswith(".tsv"):
         return "\t"
     if p.endswith(".csv"):
@@ -109,9 +114,10 @@ def resolve_csv_path(raw: str) -> Path:
     - relative -> DATA_ROOT/<raw>
     """
     raw_path = Path(raw)
-    if raw_path.is_absolute():
-        return raw_path
-    return (DATA_ROOT / raw_path).resolve()
+    # if raw_path.is_absolute():
+    #     return raw_path
+    full_path = DATA_ROOT / raw_path
+    return full_path
 
 
 # =========================
@@ -136,19 +142,30 @@ def load_oem_resources(oem_path: Path) -> dict[str, list[Resource]]:
             continue
         table_name = (res.get("name") or "").strip()
         path = (res.get("path") or "").strip()
+        full_path = Path(_s.paths.data_dir, path)
         if not table_name or not path or not looks_tabular_path(path):
             continue
 
         dialect = res.get("dialect") if isinstance(res.get("dialect"), dict) else {}
         if dialect:
-            delimiter = dialect.get("delimiter") or guess_delimiter_from_path(path)
+            delimiter = dialect.get("delimiter") or guess_delimiter_from_path(full_path)
             encoding = res.get("encoding") or dialect.get("encoding")
         else:
-            raise Exception(
+            loggi.warning(
                 f"Resource {path} for table {table_name} missing dialect info to read the CSV data."
+                f"Fall back to default encoding {_s.files.encoding} and delimiter: {_s.files.delimiter}."
+                "Set the delimiter files.delimiter in the config file if needed."
             )
-        key = normalize_table_key(table_name)
-        out[key].append(Resource(path=path, delimiter=delimiter, encoding=encoding))
+            encoding = _s.files.encoding
+            delimiter = _s.files.delimiter
+        key = oem2orm.normalizer.TABLE_NORMALIZER(str(table_name))
+        fields = res.get("schema", {}).get("fields")
+        csv_fields = [f.get("name") for f in fields if isinstance(f, dict)]
+        out[key].append(
+            Resource(
+                path=path, delimiter=delimiter, encoding=encoding, csv_fields=csv_fields
+            )
+        )
 
     return dict(out)
 
@@ -260,6 +277,7 @@ def stream_csv_batches(
     delimiter: str | None,
     encoding: str | None,
     include_columns: list[str],
+    csv_fields: list[str] | None,
     batch_size: int,
 ) -> Iterable[list[dict[str, Any]]]:
     """
@@ -271,18 +289,16 @@ def stream_csv_batches(
     enc = encoding or "utf8"  # Arrow canonical name
 
     read_opts = pacsv.ReadOptions(
-        block_size=1 << 20,  # 1 MiB blocks; tune if needed
+        block_size=10 << 20,  # 1 MiB blocks; tune if needed
         encoding=enc,
         autogenerate_column_names=False,
     )
-    parse_opts = pacsv.ParseOptions(
-        delimiter=delim,
-        newlines_in_values=True,
-    )
+    parse_opts = pacsv.ParseOptions(delimiter=delim, newlines_in_values=True)
     convert_opts = pacsv.ConvertOptions(
-        include_columns=include_columns or None,
+        include_columns=csv_fields or None,
         null_values=list(NULL_TOKENS) if NULL_TOKENS else None,
         strings_can_be_null=True,
+        timestamp_parsers=["ISO8601"],
     )
 
     # Use path directly for uncompressed; wrap compressed in a binary stream
@@ -303,11 +319,14 @@ def stream_csv_batches(
     )
     try:
         while True:
-            rb = reader.read_next_batch()
+            try:
+                rb = reader.read_next_batch()
+            except StopIteration:  # <-- FIX: end-of-stream for pyarrow reader
+                break
             if rb is None or rb.num_rows == 0:
                 break
 
-            rows = rb.to_pylist()  # list[dict], required for JSON POST + your mapper
+            rows = rb.to_pylist()
 
             if batch_size and batch_size > 0 and len(rows) > batch_size:
                 for i in range(0, len(rows), batch_size):
@@ -353,10 +372,12 @@ def convert_row_passthrough(
     column_names: list[str],
     required_nonnull: set[str],
     serial_pk: bool,
+    keymap: dict[str, str] | None = None,  # <— uses the map
 ) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for col in column_names:
-        v = row.get(col)
+        src = keymap.get(col, col) if keymap else col
+        v = row.get(src)
 
         if isinstance(v, str):
             s = v.strip()
@@ -424,6 +445,7 @@ def upload_table(
 
     for res in tabulars:
         csv_path = resolve_csv_path(res.path)
+        csv_fields = res.csv_fields or []
         if not csv_path.exists():
             raise FileNotFoundError(f"CSV not found: {csv_path}")
 
@@ -432,18 +454,27 @@ def upload_table(
             f"(delimiter='{res.delimiter or ','}', encoding='{res.encoding or 'utf-8'}')"
         )
 
+        keymap = None
+
         for raw_batch in stream_csv_batches(
             csv_path,
             res.delimiter,
             res.encoding,
             column_names,
+            csv_fields,
             BATCH_SIZE,
         ):
+            if keymap is None:
+                keymap = {}
+                for col in csv_fields:
+                    ncol = oem2orm.normalizer.COLUMN_NORMALIZER(col)
+                    keymap[ncol] = col
+
             batch: list[dict] = []
             for raw_row in raw_batch:
                 try:
                     mapped = convert_row_passthrough(
-                        raw_row, column_names, required_nonnull, serial_pk
+                        raw_row, column_names, required_nonnull, serial_pk, keymap
                     )
                 except Exception as e:
                     snippet = {k: raw_row.get(k) for k in column_names[:10]}
@@ -461,7 +492,7 @@ def upload_table(
             else:
                 status, payload = _TABLES.post_rows(schema, table, batch)
                 if status not in (200, 201, 202):
-                    raise RuntimeError(f"POST failed: {status} {payload}")
+                    loggi.warning(RuntimeError(f"POST failed: {status} {payload}"))
                 print(f"Uploaded {len(batch)} rows -> status {status}")
             total_rows += len(batch)
 
