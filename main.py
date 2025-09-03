@@ -19,9 +19,9 @@ if __name__ == "__main__":
     )
     # if you are confused how to set the path to the datapackage file you can override the settings here:
     # path = Path("datapackages/example/")
-    
+
     # load the path from settings which have been configured by the user
     path = Path(settings.paths.data_dir)
-    
+
     create_tables_on_oedb(path)
     upload_tabular_data()
