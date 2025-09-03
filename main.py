@@ -1,34 +1,27 @@
 from pathlib import Path
 
+from oep_upload.config.logging import setup_logging
 from oep_upload.create.tables import create_tables_on_oedb
 from oep_upload.upload.datapackage import upload_tabular_data
 
-import logging
-import logging.config
-import yaml
+
 from oep_upload.config import get_settings, export_env_vars
 
 
-def setup_logging():
-    try:
-        with open("config/logging.yaml", "r", encoding="utf-8") as f:
-            cfg = yaml.safe_load(f)
-        logging.config.dictConfig(cfg)
-    except Exception:
-        logging.basicConfig(level=logging.INFO)
-
-
 if __name__ == "__main__":
-    setup_logging()
+    loggi = setup_logging()
     settings = get_settings()
     export_env_vars(settings)  # keeps compatibility with code using env vars
-    logging.getLogger(__name__).info(
+    loggi.info(
         "Starting with target=%s, base_url=%s",
         settings.api.target,
         settings.endpoint.api_base_url,
     )
-    # ... rest of your program ...
-
-    path = Path("datapackages/example/")
+    # if you are confused how to set the path to the datapackage file you can override the settings here:
+    # path = Path("datapackages/example/")
+    
+    # load the path from settings which have been configured by the user
+    path = Path(settings.paths.data_dir)
+    
     create_tables_on_oedb(path)
     upload_tabular_data()
