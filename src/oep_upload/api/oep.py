@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -26,6 +26,10 @@ class OEPApiClient:
     max_retries: int = 3
     retry_base_delay: float = 1.5
 
+    # Runtime attrs must be declared when using slots=True
+    session: requests.Session = field(init=False, repr=False)
+    auth: Optional[HTTPBasicAuth] = field(init=False, default=None, repr=False)
+
     def __post_init__(self):
         self.base_url = self.base_url.rstrip("/") + "/"
         self.session = requests.Session()
@@ -33,11 +37,11 @@ class OEPApiClient:
         if self.token:
             headers["Authorization"] = f"Token {self.token}"
         self.session.headers.update(headers)
-        self.auth = (
-            HTTPBasicAuth(self.username, self.password)
-            if self.username and self.password
-            else None
-        )
+
+        if self.username and self.password:
+            self.auth = HTTPBasicAuth(self.username, self.password)
+        else:
+            self.auth = None
 
     def join(self, *parts: str) -> str:
         return self.base_url + "/".join(p.strip("/") for p in parts if p is not None)
