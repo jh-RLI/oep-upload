@@ -37,8 +37,13 @@ class PathsSettings(BaseModel):
     )
 
 
+class FileSettings(BaseModel):
+    encoding: str = "utf-8"
+    delimiter: str = ";"
+
+
 class UploadSettings(BaseModel):
-    batch_size: int = 500
+    batch_size: int = 5000
     dry_run: bool = False
     default_schema: str = "model_draft"
     max_retries: int = 5
@@ -57,6 +62,7 @@ class Settings(BaseSettings):
     app: AppSettings
     api: APISettings
     paths: PathsSettings = PathsSettings()
+    files: FileSettings = FileSettings()
     upload: UploadSettings = UploadSettings()
 
     oep_user: Optional[str] = None
