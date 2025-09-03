@@ -4,6 +4,10 @@ from oem2orm import oep_oedialect_oem2orm as oem2orm
 from oep_upload.config import get_settings, export_env_vars
 import pathlib
 
+from oep_upload.config.logging import setup_logging
+
+loggi = setup_logging()
+
 settings = get_settings()
 export_env_vars(settings)
 
@@ -25,9 +29,9 @@ def create_tables_on_oedb(metadata_folder_name: Path):
     oem2orm.create_tables(db, tables)
 
     # Upload metadata for single table
-    metadata = oem2orm.mdToDict(metadata_folder_name, "oed_example.json")
-    if metadata:
-        oem2orm.api_updateMdOnTable(metadata)
+    # metadata = oem2orm.mdToDict(metadata_folder_name, "oed_example.json")
+    # if metadata:
+    #     oem2orm.api_updateMdOnTable(metadata)
 
 
 if __name__ == "__main__":
