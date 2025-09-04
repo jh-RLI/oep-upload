@@ -6,18 +6,17 @@ from typing import Any, Dict
 
 import yaml
 
-try:
-    from dotenv import load_dotenv
-except Exception:
-
-    def load_dotenv(*args, **kwargs):  # no-op fallback
-        return False
+from dotenv import load_dotenv, find_dotenv
 
 
 from pydantic_settings import PydanticBaseSettingsSource
 from oep_upload.config.models import Settings
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Keep this if you need it for your YAML paths
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[3]  # .../oep-upload
 
 
 def _read_yaml(path: Path) -> Dict[str, Any]:
@@ -72,14 +71,24 @@ def _build_settings(
     env_name: str,
     single_yaml_str: str | None,
 ):
+    # --- .env loading (robust, but non-invasive) ---
     if env_file_str:
         load_dotenv(env_file_str, override=True)
     else:
         if hint := os.getenv("OEP_ENV_FILE"):
             load_dotenv(hint, override=True)
         else:
-            load_dotenv(Path(ROOT, ".env"), override=False)
+            # Try to find a .env from the current working dir upward
+            found = find_dotenv(usecwd=True)
+            if found:
+                load_dotenv(found, override=False)
+            else:
+                # Fallback: try repo root (two levels above your package root)
+                load_dotenv(
+                    Path(__file__).resolve().parents[3] / ".env", override=False
+                )
 
+    # Keep your existing config logic/paths
     cfg_dir = Path(cfg_dir_str).resolve()
     single_yaml = Path(single_yaml_str).resolve() if single_yaml_str else None
 
@@ -92,12 +101,16 @@ def _build_settings(
             env_settings,
             dotenv_settings,
             file_secret_settings,
+            # --- bind outer variables here to avoid NameError ---
+            _cfg_dir=cfg_dir,
+            _env_name=env_name,
+            _single_yaml=single_yaml,
         ):
             yaml_source = YamlSettingsSource(
                 settings_cls,
-                cfg_dir=cfg_dir,
-                env_name=env_name,
-                single_yaml=single_yaml,
+                cfg_dir=_cfg_dir,
+                env_name=_env_name,
+                single_yaml=_single_yaml,
             )
             return (
                 init_settings,
