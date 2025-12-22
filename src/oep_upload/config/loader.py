@@ -138,7 +138,7 @@ def get_settings(
     single_yaml_str = (
         str(settings_yaml) if settings_yaml else os.getenv("OEP_SETTINGS_FILE")
     )
-    env_name_eff = env_name or os.getenv("ENV", "dev")
+    env_name_eff = env_name or os.getenv("ENV", "prod")
     env_file_str = str(env_file) if env_file else None
     return _build_settings(cfg_dir_str, env_file_str, env_name_eff, single_yaml_str)
 
@@ -153,3 +153,4 @@ def export_env_vars(s: Settings) -> None:
     os.environ["OEP_OEM_FILE"] = s.paths.datapackage_file or ""
     if s.oep_user:
         os.environ["OEP_USER"] = s.oep_user
+    # os.environ[]
