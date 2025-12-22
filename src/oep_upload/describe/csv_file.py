@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import argparse
 import hashlib
 import json
@@ -34,6 +35,21 @@ class PackageSelectError(Exception):
 # -----------------------
 # Utilities
 # -----------------------
+
+
+def _is_blank(v) -> bool:
+    return not isinstance(v, str) or v.strip() == ""
+
+
+def _slugify_name(s: str) -> str:
+    s = s.strip().lower().replace(" ", "-")
+    s = re.sub(r"[^\w\-]+", "-", s)
+    s = re.sub(r"-{2,}", "-", s).strip("-")
+    return s or "resource"
+
+
+def _to_posix(p: Path, base: Path) -> str:
+    return str(p.relative_to(base).as_posix())
 
 
 def _safe_is_relative_to(path: Path, base: Path) -> bool:
@@ -90,96 +106,114 @@ def _validate_and_resolve_roots() -> tuple[Path, Path]:
     return ROOT, DATA_ROOT
 
 
-def _has_datapackage_markers(p: Path) -> bool:
+def _has_marker_file(p: Path) -> bool:
     return (p / "datapackage.json").is_file() or (
         p / "datapackage.generated.json"
     ).is_file()
 
 
+def _contains_csvs(data_dir: Path) -> bool:
+    if not data_dir.is_dir():
+        return False
+    try:
+        next(
+            d for d in data_dir.rglob("*") if d.is_file() and d.suffix.lower() == ".csv"
+        )
+        return True
+    except StopIteration:
+        return False
+
+
+def _looks_like_package(p: Path) -> bool:
+    """A directory looks like a package if it has datapackage markers OR a data/ folder with CSVs."""
+    return _has_marker_file(p) or _contains_csvs(p / "data")
+
+
 def _resolve_package_root_from_hint(hint: Optional[str | Path]) -> Path:
     """
-    Resolve a single datapackage root directory:
+    Resolve a single datapackage root directory.
 
-      Accepts hints relative to DATA_ROOT or to the repo ROOT, and also absolute paths.
-      Walks upward until a directory with datapackage markers is found.
-      Requires the package root to contain a 'data/' subdirectory.
+    Accepts:
+      - Absolute paths
+      - Paths relative to DATA_ROOT
+      - Paths relative to project ROOT
+      - Bare names (matched under DATA_ROOT or ROOT)
 
-      If hint is None, tries settings.paths.datapackage_dir; if that is also None,
-      auto-detects if exactly one package exists under DATA_ROOT.
+    A directory qualifies as a package if it either has datapackage markers
+    OR contains a 'data/' subfolder with at least one CSV.
+
+    If hint is None, tries settings.paths.data_dir; if still None,
+    auto-detects when exactly one such directory exists under DATA_ROOT.
     """
     ROOT, DATA_ROOT = _validate_and_resolve_roots()
 
-    # 1) Determine the initial "candidate" path from the hint (or settings)
+    # 1) Initial hint
     if hint is None:
-        hint = getattr(settings.paths, "datapackage_dir", None)
+        hint = getattr(settings.paths, "data_dir", None)
 
+    # 2) Auto-detect if no hint
     if hint is None:
-        # Attempt auto-detection: look for exactly one directory under DATA_ROOT with datapackage markers
         candidates = [
-            d for d in DATA_ROOT.iterdir() if d.is_dir() and _has_datapackage_markers(d)
+            d for d in DATA_ROOT.iterdir() if d.is_dir() and _looks_like_package(d)
         ]
         if len(candidates) == 1:
-            pkg_root = candidates[0]
+            pkg_root = candidates[0].resolve()
             log.info("Auto-selected datapackage: %s", pkg_root)
-            data_dir = pkg_root / "data"
-            if not data_dir.is_dir():
-                raise PackageSelectError(
-                    f"Found datapackage at {pkg_root} but missing 'data/' subfolder."
-                )
             return pkg_root
         elif len(candidates) == 0:
             raise PackageSelectError(
-                "No datapackage found under DATA_ROOT. "
-                "Set settings.paths.datapackage_dir or create a datapackage with datapackage.json."
+                "No datapackage-like directory found under DATA_ROOT. "
+                "Provide --package or set settings.paths.data_dir to a folder with 'data/' and CSVs."
             )
         else:
             names = ", ".join(c.name for c in candidates)
             raise PackageSelectError(
-                f"Multiple datapackages under {DATA_ROOT}: {names}. "
-                "Set settings.paths.datapackage_dir to choose one."
+                f"Multiple datapackage-like directories under {DATA_ROOT}: {names}. "
+                "Provide --package or set settings.paths.data_dir."
             )
 
     hint = Path(hint).expanduser()
 
-    # 2) Try a series of resolution strategies, in this order:
-    resolution_order = []
-
-    # Absolute path as-is
+    # 3) Build resolution candidates
+    resolution_order: list[Path] = []
     if hint.is_absolute():
         resolution_order.append(hint)
     else:
-        # a) Under DATA_ROOT
         resolution_order.append((DATA_ROOT / hint).resolve())
-        # b) Under ROOT
         resolution_order.append((ROOT / hint).resolve())
 
-    # c) If hint is a bare name, try child directories by name under DATA_ROOT then ROOT
-    if not hint.is_absolute() and len(hint.parts) == 1:
-        by_name_dr = [
-            d for d in DATA_ROOT.iterdir() if d.is_dir() and d.name == hint.name
-        ]
-        by_name_root = [d for d in ROOT.iterdir() if d.is_dir() and d.name == hint.name]
-        resolution_order.extend(by_name_dr + by_name_root)
+        # Bare name search under DATA_ROOT then ROOT
+        if len(hint.parts) == 1:
+            by_name_dr = [
+                d for d in DATA_ROOT.iterdir() if d.is_dir() and d.name == hint.name
+            ]
+            by_name_root = [
+                d for d in ROOT.iterdir() if d.is_dir() and d.name == hint.name
+            ]
+            resolution_order.extend(by_name_dr + by_name_root)
 
-    # 3) Pick the first existing path and walk up to find the package root
+    # 4) For each existing candidate, accept it or walk up until ROOT looking for a package-like dir
     for base in resolution_order:
         if not base.exists():
             continue
         probe = base if base.is_dir() else base.parent
 
+        # If the probe itself looks like a package, accept it
+        if _looks_like_package(probe):
+            if not _safe_is_relative_to(probe, ROOT):
+                raise PackageSelectError(
+                    f"Package root {probe} must be inside project ROOT {ROOT}"
+                )
+            return probe.resolve()
+
         # Walk up to ROOT boundary
         for ancestor in [probe, *probe.parents]:
-            if _has_datapackage_markers(ancestor):
+            if _looks_like_package(ancestor):
                 if not _safe_is_relative_to(ancestor, ROOT):
                     raise PackageSelectError(
                         f"Package root {ancestor} must be inside project ROOT {ROOT}"
                     )
-                data_dir = ancestor / "data"
-                if not data_dir.is_dir():
-                    raise PackageSelectError(
-                        f"Found datapackage at {ancestor} but missing 'data/' subfolder."
-                    )
-                return ancestor
+                return ancestor.resolve()
             # stop walking once we leave ROOT
             try:
                 ancestor.relative_to(ROOT)
@@ -201,7 +235,7 @@ def _iter_csvs_in_datapackage(package_root: Path) -> Iterable[Path]:
 
 def _ensure_resource_name(meta: dict, csv_path: Path, package_root: Path) -> None:
     """
-    Ensure the inferred metadata has a useful resource name and a path relative to package root.
+    Ensure resource has a non-empty name and a POSIX-relative path.
     """
     try:
         if (
@@ -210,9 +244,16 @@ def _ensure_resource_name(meta: dict, csv_path: Path, package_root: Path) -> Non
             and meta["resources"]
         ):
             res = meta["resources"][0]
-            res.setdefault("name", csv_path.stem)
-            # Relative path like "data/.../file.csv"
-            res["path"] = str(csv_path.relative_to(package_root))
+
+            # If name missing or blank, set from filename stem (slugified)
+            if _is_blank(res.get("name")):
+                res["name"] = _slugify_name(csv_path.stem)
+
+            # Always ensure path is relative POSIX ("data/.../file.csv")
+            res["path"] = _to_posix(csv_path, package_root)
+
+            # Helpful default that doesn't hurt if already set
+            res.setdefault("profile", "tabular-data-resource")
     except Exception:
         pass
 
@@ -377,7 +418,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--package",
         "-p",
-        help="Datapackage name or path. If omitted, uses settings.paths.data_dir.",
+        help=(
+            "Datapackage name or path. May point to a folder with 'data/' containing CSVs "
+            "(even without a datapackage.json). If omitted, uses settings.paths.data_dir "
+            "or auto-detects a single package under DATA_ROOT."
+        ),
         default=None,
     )
     parser.add_argument(
