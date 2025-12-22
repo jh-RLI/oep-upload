@@ -19,19 +19,10 @@ def create_tables_on_oedb(metadata_folder_name: Path):
     :param metadata_folder_name: Path to the folder containing metadata files.
                                     must be part of the current directory.
     """
-    db = oem2orm.setup_db_connection(
-        host=settings.api.local.host,
-        user=settings.oep_user,
-        token=settings.oep_api_token_local,
-    )
+    db = oem2orm.setup_db_connection()
     folder = pathlib.Path.cwd() / metadata_folder_name
     tables = oem2orm.collect_tables_from_oem_files(db, folder)
     oem2orm.create_tables(db, tables)
-
-    # Upload metadata for single table
-    # metadata = oem2orm.mdToDict(metadata_folder_name, "oed_example.json")
-    # if metadata:
-    #     oem2orm.api_updateMdOnTable(metadata)
 
 
 if __name__ == "__main__":
