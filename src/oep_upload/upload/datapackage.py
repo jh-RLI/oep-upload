@@ -3,15 +3,14 @@ from __future__ import annotations
 import os
 import json
 import re
-from collections import defaultdict, deque
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Iterable
-
 import ast
 import gzip
 import bz2
 import lzma
+from collections import defaultdict, deque
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable
 
 import pyarrow as pa
 import pyarrow.csv as pacsv
@@ -52,9 +51,6 @@ OEM_FILE = (
 # Global override map (filled later)
 RESOURCES_BY_TABLE: dict[str, list["Resource"]] = {}
 _TABLES = TablesService(OEPApiClient.from_settings())
-
-# CSV first-column header markers to skip
-HEADER_MARKERS = {"from", "to", "type"}
 
 # Try to mirror the normalizer’s max column length for suffix truncation (safety)
 try:
@@ -103,10 +99,10 @@ def looks_tabular_path(path: str | None) -> bool:
     return p.endswith(".csv") or p.endswith(".tsv")
 
 
-def guess_delimiter_from_path(path: Path | None) -> str:
+def guess_delimiter_from_path(path: Path | str | None) -> str:
     if not path:
         return ","
-    p = path.__str__().lower()
+    p = str(path).lower()
     if p.endswith(".tsv"):
         return "\t"
     if p.endswith(".csv"):
@@ -117,14 +113,13 @@ def guess_delimiter_from_path(path: Path | None) -> str:
 def resolve_csv_path(raw: str) -> Path:
     """
     Resolution:
-    - absolute & exists -> use it
+    - absolute -> use it
     - relative -> DATA_ROOT/<raw>
     """
     raw_path = Path(raw)
-    # if raw_path.is_absolute():
-    #     return raw_path
-    full_path = DATA_ROOT / raw_path
-    return full_path
+    if raw_path.is_absolute():
+        return raw_path
+    return (DATA_ROOT / raw_path).resolve()
 
 
 # =========================
@@ -133,7 +128,7 @@ def resolve_csv_path(raw: str) -> Path:
 def load_oem_resources(oem_path: Path) -> dict[str, list[Resource]]:
     """
     Parse datapackage/OEM file and return:
-      { <normalized bare table>: [Resource(...), ...] }
+      { <normalized table>: [Resource(...), ...] }
     Only local CSV/TSV are included. Delimiter falls back to extension.
     """
     with oem_path.open("r", encoding="utf-8") as f:
@@ -149,9 +144,11 @@ def load_oem_resources(oem_path: Path) -> dict[str, list[Resource]]:
             continue
         table_name = (res.get("name") or "").strip()
         path = (res.get("path") or "").strip()
-        full_path = Path(_s.paths.data_dir, path)
         if not table_name or not path or not looks_tabular_path(path):
             continue
+
+        # used for delimiter guessing only; actual path resolution later
+        full_path = Path(_s.paths.data_dir, path)
 
         dialect = res.get("dialect") if isinstance(res.get("dialect"), dict) else {}
         if dialect:
@@ -159,15 +156,21 @@ def load_oem_resources(oem_path: Path) -> dict[str, list[Resource]]:
             encoding = res.get("encoding") or dialect.get("encoding")
         else:
             loggi.warning(
-                f"Resource {path} for table {table_name} missing dialect info to read the CSV data."
-                f"Fall back to default encoding {_s.files.encoding} and delimiter: {_s.files.delimiter}."
-                "Set the delimiter files.delimiter in the config file if needed."
+                f"Resource {path} for table {table_name} missing dialect info to read the CSV data. "
+                f"Fall back to default encoding {_s.files.encoding} and delimiter: {_s.files.delimiter}. "
+                "Set files.delimiter in the config file if needed."
             )
             encoding = _s.files.encoding
             delimiter = _s.files.delimiter
+
         key = oem2orm.normalizer.TABLE_NORMALIZER(str(table_name))
         fields = res.get("schema", {}).get("fields")
-        csv_fields = [f.get("name") for f in fields if isinstance(f, dict)]
+        csv_fields: list[str] | None = None
+        if isinstance(fields, list):
+            csv_fields = [
+                f.get("name") for f in fields if isinstance(f, dict) and f.get("name")
+            ]
+
         out[key].append(
             Resource(
                 path=path, delimiter=delimiter, encoding=encoding, csv_fields=csv_fields
@@ -182,19 +185,14 @@ def find_datapackage() -> Path | None:
     Discovery priority:
       1) env OEP_OEM_FILE (if present)
       2) config.paths.datapackage_file (if provided)
-      ---- Deactivated for now ----
-      3) DATA_ROOT/datapackage.json
-      4) CWD/datapackage.json
-      5) ROOT/datapackage.json
     """
-    env_hint = (
-        (Path.cwd() / (os.environ.get("OEP_OEM_FILE") or "")).resolve()
-        if "OEP_OEM_FILE" in os.environ
-        else None
-    )
     candidates: list[Path] = []
-    if env_hint and env_hint.name:
-        candidates.append(env_hint)
+
+    env_val = os.environ.get("OEP_OEM_FILE")
+    if env_val:
+        p = Path(env_val)
+        candidates.append(p if p.is_absolute() else (Path.cwd() / p).resolve())
+
     if OEM_FILE:
         candidates.append(OEM_FILE)
 
@@ -261,8 +259,6 @@ def find_tabulars_in_meta(meta_dict: dict) -> list[Resource]:
 def _open_binary_any(path: Path):
     """
     Open file as binary, transparently handling common compression formats.
-    (Decompression happens in Python here. For maximum throughput, provide
-    uncompressed CSVs when possible.)
     """
     p = str(path).lower()
     if p.endswith(".gz"):
@@ -278,7 +274,7 @@ def stream_csv_batches(
     csv_path: Path,
     delimiter: str | None,
     encoding: str | None,
-    include_columns: list[str],
+    include_columns: list[str],  # kept for signature compatibility
     csv_fields: list[str] | None,
     batch_size: int,
 ) -> Iterable[list[dict[str, Any]]]:
@@ -293,17 +289,16 @@ def stream_csv_batches(
     read_opts = pacsv.ReadOptions(
         block_size=10 << 20,  # 10 MiB
         encoding=enc,
-        autogenerate_column_names=True,     # <-- IMPORTANT: no header row; names f0,f1,...
+        autogenerate_column_names=True,  # IMPORTANT: no header row; names f0,f1,...
     )
     parse_opts = pacsv.ParseOptions(delimiter=delim, newlines_in_values=True)
     convert_opts = pacsv.ConvertOptions(
-        include_columns=None,               # <-- read all; we'll map later by index
+        include_columns=None,  # read all; we'll map later by index
         null_values=list(NULL_TOKENS) if NULL_TOKENS else None,
         strings_can_be_null=True,
         timestamp_parsers=["ISO8601"],
     )
 
-    # Use path directly for uncompressed; wrap compressed in a binary stream
     lower = str(csv_path).lower()
     compressed = lower.endswith((".gz", ".bz2", ".bzip2", ".xz", ".lzma"))
     if compressed:
@@ -401,11 +396,94 @@ def convert_row_passthrough(
 
 
 # =========================
-# UPLOAD (per table)
+# CLASSIC HEADER DETECTION
 # =========================
-def upload_table(
-    schema: str, table: str, resources_override: list[Resource] | None = None
-) -> None:
+def looks_like_classic_header_row(
+    first_row: dict[str, Any],
+    csv_fields: list[str] | None,
+    norm_by_index: list[str] | None,
+    db_column_names: list[str],
+) -> bool:
+    """
+    Detect a typical 1-row CSV header (even though Arrow reads it as data).
+
+    Robust against DB normalization/truncation:
+      - Prefer raw match vs OEM csv_fields
+      - Then normalized match vs norm_by_index (built from csv_fields with unique suffix decisions)
+      - Finally fallback: normalized match vs DB column names
+    """
+
+    def key_idx(k: str) -> int:
+        if k.startswith("f") and k[1:].isdigit():
+            return int(k[1:])
+        return 10**9
+
+    keys = sorted(first_row.keys(), key=key_idx)
+    cells: list[str] = []
+    for k in keys:
+        v = first_row.get(k)
+        cells.append(v.strip() if isinstance(v, str) else "")
+
+    if not cells:
+        return False
+
+    nonempty = sum(1 for c in cells if c)
+    if nonempty < max(1, int(0.6 * len(cells))):
+        return False
+
+    # 1) raw match vs csv_fields
+    if csv_fields:
+        a = [c.lower() for c in cells[: len(csv_fields)]]
+        b = [c.lower() for c in csv_fields]
+        eq = sum(1 for x, y in zip(a, b) if x == y)
+        if eq >= max(1, int(0.8 * min(len(a), len(b)))):
+            return True
+
+    # 2) normalized match vs norm_by_index
+    norm = oem2orm.normalizer.COLUMN_NORMALIZER
+    norm_cells = [norm(c) for c in cells if c]
+
+    if norm_by_index:
+        exp = norm_by_index[: len(norm_cells)]
+        eqn = sum(1 for x, y in zip(norm_cells, exp) if x == y)
+        if eqn >= max(1, int(0.7 * min(len(norm_cells), len(exp)))):
+            return True
+
+    # 3) fallback: normalized match vs DB columns
+    db_set = set(db_column_names)
+    hit = sum(1 for x in norm_cells if x in db_set)
+    if hit >= max(1, int(0.7 * len(norm_cells))):
+        return True
+
+    return False
+
+
+# =========================
+# UPLOAD REFACTOR HELPERS
+# =========================
+@dataclass(slots=True)
+class TableShape:
+    want_from: str
+    want_to: str
+    want_type: str
+    value_col: str | None
+    time_col: str | None
+    has_long_shape: bool
+
+
+@dataclass(slots=True)
+class HeaderContext:
+    has_multi: bool = False
+    skip_count: int = 0
+    header_from: list[str] | None = None
+    header_to: list[str] | None = None
+    header_type: list[str] | None = None
+    header_rows_skipped: bool = False
+
+
+def _get_tabular_resources(
+    schema: str, table: str, resources_override: list[Resource] | None
+) -> list[Resource]:
     """
     Source priority:
       1) explicit resources_override,
@@ -424,15 +502,17 @@ def upload_table(
     if not tabulars:
         raise RuntimeError(f"No local tabular paths found for {table}")
 
+    return tabulars
+
+
+def _get_table_columns(schema: str, table: str) -> tuple[list[str], set[str], bool]:
     info = _TABLES.get_table_info(schema, table)
     columns: dict[str, dict] = info["columns"]
     column_names = list(columns.keys())
+
     required_nonnull: set[str] = {
         c for c, d in columns.items() if not d.get("is_nullable", True)
     }
-
-    # initialize outside the id-branch
-    total_rows = 0
 
     serial_pk = False
     if "id" in columns:
@@ -442,6 +522,245 @@ def upload_table(
             serial_pk = True
             required_nonnull.discard("id")
 
+    return column_names, required_nonnull, serial_pk
+
+
+def _infer_shape(column_names: list[str]) -> TableShape:
+    db_cols_set = set(column_names)
+    norm = oem2orm.normalizer.COLUMN_NORMALIZER
+
+    want_from = norm("from")
+    want_to = norm("to")
+    want_type = norm("type")
+
+    cand_values = [norm("value"), norm("amount"), norm("val")]
+    value_col = next((c for c in cand_values if c in db_cols_set), None)
+
+    has_long_shape = (
+        want_from in db_cols_set and want_to in db_cols_set and value_col is not None
+    )
+
+    cand_time = [norm("time"), norm("timestamp"), norm("datetime"), norm("ts")]
+    time_col = next((c for c in cand_time if c in db_cols_set), None)
+
+    return TableShape(
+        want_from=want_from,
+        want_to=want_to,
+        want_type=want_type,
+        value_col=value_col,
+        time_col=time_col,
+        has_long_shape=has_long_shape,
+    )
+
+
+def _precompute_norm_by_index(csv_fields: list[str] | None) -> list[str]:
+    if not csv_fields:
+        return []
+    orig_to_norm = oem2orm.normalizer.build_unique_column_map(
+        csv_fields,
+        normalizer=oem2orm.normalizer.COLUMN_NORMALIZER,
+    )
+    return [orig_to_norm[o] for o in csv_fields]
+
+
+def _detect_multirow_header(raw_batch: list[dict[str, Any]]) -> HeaderContext:
+    ctx = HeaderContext()
+    if not raw_batch:
+        return ctx
+
+    header_candidates = raw_batch[:3]
+
+    def _cell(row: dict[str, Any], key: str) -> str:
+        v = row.get(key)
+        return v if isinstance(v, str) else ""
+
+    if (
+        len(header_candidates) >= 2
+        and _cell(header_candidates[0], "f0").strip().lower() == "from"
+        and _cell(header_candidates[1], "f0").strip().lower() == "to"
+    ):
+        ctx.has_multi = True
+        ctx.header_from = []
+        ctx.header_to = []
+        ctx.header_type = []
+
+        ncols = len(header_candidates[0].keys())
+        for j in range(1, ncols):
+            fj = f"f{j}"
+            ctx.header_from.append(_cell(header_candidates[0], fj))
+            ctx.header_to.append(_cell(header_candidates[1], fj))
+            if (
+                len(header_candidates) >= 3
+                and _cell(header_candidates[2], "f0").strip().lower() == "type"
+            ):
+                ctx.header_type.append(_cell(header_candidates[2], fj))
+            else:
+                ctx.header_type.append("")
+
+        ctx.skip_count = 2
+        if (
+            len(header_candidates) >= 3
+            and _cell(header_candidates[2], "f0").strip().lower() == "type"
+        ):
+            ctx.skip_count = 3
+
+    return ctx
+
+
+def _build_keymap_for_wide(
+    column_names: list[str],
+    norm_by_index: list[str],
+    *,
+    data_offset: int,
+) -> dict[str, str]:
+    """
+    Map DB col -> f{i} by position.
+
+    data_offset:
+      - 0 for classic wide files where first data column is f0
+      - 1 for multi-row header wide fallback where first data column is f1
+    """
+    keymap: dict[str, str] = {}
+
+    if norm_by_index:
+        for i, norm_name in enumerate(norm_by_index, start=data_offset):
+            if norm_name in column_names:
+                keymap[norm_name] = f"f{i}"
+    else:
+        for i, col in enumerate(column_names, start=data_offset):
+            keymap[col] = f"f{i}"
+
+    for col in column_names:
+        keymap.setdefault(col, col)
+
+    return keymap
+
+
+def _skip_headers_if_needed(
+    raw_batch: list[dict[str, Any]],
+    ctx: HeaderContext,
+    *,
+    csv_fields: list[str] | None,
+    norm_by_index: list[str],
+    column_names: list[str],
+) -> list[dict[str, Any]]:
+    if ctx.header_rows_skipped or not raw_batch:
+        return raw_batch
+
+    if ctx.has_multi:
+        raw_batch = raw_batch[ctx.skip_count :]
+        ctx.header_rows_skipped = True
+        return raw_batch
+
+    # classic 1-row header
+    if looks_like_classic_header_row(
+        raw_batch[0],
+        csv_fields=csv_fields if csv_fields else None,
+        norm_by_index=norm_by_index if norm_by_index else None,
+        db_column_names=column_names,
+    ):
+        raw_batch = raw_batch[1:]
+
+    ctx.header_rows_skipped = True
+    return raw_batch
+
+
+def _emit_long_rows(
+    raw_batch: list[dict[str, Any]],
+    ctx: HeaderContext,
+    shape: TableShape,
+    *,
+    db_cols_set: set[str],
+) -> list[dict[str, Any]]:
+    if (
+        not ctx.has_multi
+        or not shape.has_long_shape
+        or not ctx.header_from
+        or not shape.value_col
+    ):
+        return []
+
+    out_rows: list[dict[str, Any]] = []
+    header_from = ctx.header_from
+    header_to = ctx.header_to or [""] * len(header_from)
+    header_type = ctx.header_type or [""] * len(header_from)
+
+    for r in raw_batch:
+        ts_val = r.get("f0")
+        if ts_val in (None, ""):
+            continue
+
+        for j in range(1, 1 + len(header_from)):
+            fj = f"f{j}"
+            val = r.get(fj)
+
+            newrow: dict[str, Any] = {}
+            if shape.time_col:
+                newrow[shape.time_col] = ts_val
+
+            newrow[shape.want_from] = (
+                header_from[j - 1] if j - 1 < len(header_from) else None
+            )
+            newrow[shape.want_to] = header_to[j - 1] if j - 1 < len(header_to) else None
+            if shape.want_type in db_cols_set:
+                newrow[shape.want_type] = (
+                    header_type[j - 1] if j - 1 < len(header_type) else None
+                )
+
+            newrow[shape.value_col] = val
+            out_rows.append(newrow)
+
+    return out_rows
+
+
+def _map_wide_rows(
+    raw_batch: list[dict[str, Any]],
+    column_names: list[str],
+    required_nonnull: set[str],
+    serial_pk: bool,
+    keymap: dict[str, str],
+    csv_path: Path,
+) -> list[dict[str, Any]]:
+    batch: list[dict[str, Any]] = []
+    for raw_row in raw_batch:
+        try:
+            mapped = convert_row_passthrough(
+                raw_row, column_names, required_nonnull, serial_pk, keymap
+            )
+        except Exception as e:
+            snippet = {k: raw_row.get(k) for k in list(raw_row.keys())[:10]}
+            raise RuntimeError(
+                f"Row conversion error in {csv_path.name}: {e}\n"
+                f"Row head: {json.dumps(snippet, ensure_ascii=False)[:300]}..."
+            ) from e
+        batch.append(mapped)
+    return batch
+
+
+def _post_rows(schema: str, table: str, rows: list[dict[str, Any]]) -> None:
+    if DRY_RUN:
+        print(f"DRY_RUN: would POST {len(rows)} rows")
+        return
+
+    status, payload = _TABLES.post_rows(schema, table, rows)
+    if status not in (200, 201, 202):
+        loggi.warning(RuntimeError(f"POST failed: {status} {payload}"))
+    print(f"Uploaded {len(rows)} rows -> status {status}")
+
+
+# =========================
+# UPLOAD (per table) - REFACTORED
+# =========================
+def upload_table(
+    schema: str, table: str, resources_override: list[Resource] | None = None
+) -> None:
+    tabulars = _get_tabular_resources(schema, table, resources_override)
+    column_names, required_nonnull, serial_pk = _get_table_columns(schema, table)
+    shape = _infer_shape(column_names)
+    db_cols_set = set(column_names)
+
+    total_rows = 0
+
     if len(tabulars) > 1:
         print(
             f"Note: multiple tabular paths found for {table}: {[t.path for t in tabulars]}"
@@ -449,7 +768,8 @@ def upload_table(
 
     for res in tabulars:
         csv_path = resolve_csv_path(res.path)
-        csv_fields = res.csv_fields or []  # original field names from metadata (ordered)
+        csv_fields = res.csv_fields or []
+
         if not csv_path.exists():
             raise FileNotFoundError(f"CSV not found: {csv_path}")
 
@@ -458,20 +778,10 @@ def upload_table(
             f"(delimiter='{res.delimiter or ','}', encoding='{res.encoding or 'utf-8'}')"
         )
 
-        keymap = None
-        header_rows_skipped = False
-        header_skip_count = 0
+        norm_by_index = _precompute_norm_by_index(csv_fields)
 
-        # Precompute normalized names by index from metadata (same function used for DB creation)
-        # This gives us deterministic DB column names in the same order as the CSV columns.
-        orig_to_norm: dict[str, str] = {}
-        norm_by_index: list[str] = []
-        if csv_fields:
-            orig_to_norm = oem2orm.normalizer.build_unique_column_map(
-                csv_fields,
-                normalizer=oem2orm.normalizer.COLUMN_NORMALIZER,
-            )
-            norm_by_index = [orig_to_norm[o] for o in csv_fields]
+        keymap: dict[str, str] | None = None
+        header_ctx = HeaderContext()
 
         for raw_batch in stream_csv_batches(
             csv_path,
@@ -481,192 +791,52 @@ def upload_table(
             csv_fields,
             BATCH_SIZE,
         ):
-                keymap = None
-        header_rows_skipped = False
-        header_skip_count = 0
-
-        # Detect if the destination looks like a "long" table
-        # (we'll pivot if yes)
-        db_cols_set = set(column_names)
-        # normalize canonical names we expect
-        norm = oem2orm.normalizer.COLUMN_NORMALIZER
-        want_from = norm("from")
-        want_to = norm("to")
-        want_type = norm("type")
-        # try common value column names
-        cand_values = [norm("value"), norm("amount"), norm("val")]
-        value_col = next((c for c in cand_values if c in db_cols_set), None)
-        has_long_shape = (
-            want_from in db_cols_set
-            and want_to in db_cols_set
-            and value_col is not None
-        )
-        # optional time column name
-        cand_time = [norm("time"), norm("timestamp"), norm("datetime"), norm("ts")]
-        time_col = next((c for c in cand_time if c in db_cols_set), None)
-
-        # storage for multi-row header (only when present)
-        header_from: list[str] | None = None
-        header_to: list[str] | None = None
-        header_type: list[str] | None = None
-
-        for raw_batch in stream_csv_batches(
-            csv_path,
-            res.delimiter,
-            res.encoding,
-            column_names,
-            csv_fields,
-            BATCH_SIZE,
-        ):
-            # Build mapping / gather multi-row header on first batch
             if keymap is None:
-                keymap = {}
+                header_ctx = _detect_multirow_header(raw_batch)
 
-                # We always get f0..fN keys in rows due to autogenerate_column_names=True
-                # Peek to see if first rows are the special header rows
-                header_candidates = raw_batch[:3] if raw_batch else []
-                
-                def _cell(row: dict[str, Any], key: str) -> str:
-                    v = row.get(key)
-                    return v if isinstance(v, str) else ""
-
-                if len(header_candidates) >= 2 and _cell(header_candidates[0], "f0").strip().lower() == "from" and _cell(header_candidates[1], "f0").strip().lower() == "to":
-                    # Yes: multi-row header present (maybe row 2 = 'type')
-                    header_rows_skipped = False
-                    header_from = []
-                    header_to = []
-                    header_type = []
-
-                    # collect per-series labels for columns f1..fN
-                    ncols = len(header_candidates[0].keys())
-                    # columns start at f1; f0 is the "label" column
-                    for j in range(1, ncols):
-                        fj = f"f{j}"
-                        header_from.append(_cell(header_candidates[0], fj))
-                        header_to.append(_cell(header_candidates[1], fj))
-                        if len(header_candidates) >= 3 and _cell(header_candidates[2], "f0").strip().lower() == "type":
-                            header_type.append(_cell(header_candidates[2], fj))
-                        else:
-                            header_type.append("")
-
-                    # compute how many header rows to skip (2 or 3)
-                    header_skip_count = 2
-                    if len(header_candidates) >= 3 and _cell(header_candidates[2], "f0").strip().lower() == "type":
-                        header_skip_count = 3
-
-                    # Build a positional keymap for wide fallback (if we don't pivot)
-                    if not has_long_shape:
-                        # If we know csv_fields from metadata, use them to make DB names in order
-                        if csv_fields:
-                            orig_to_norm = oem2orm.normalizer.build_unique_column_map(
-                                csv_fields,
-                                normalizer=oem2orm.normalizer.COLUMN_NORMALIZER,
-                            )
-                            norm_by_index = [orig_to_norm[o] for o in csv_fields]
-                            for i, norm_name in enumerate(norm_by_index, start=1):
-                                if norm_name in column_names:
-                                    keymap[norm_name] = f"f{i}"
-                        else:
-                            # naively map DB cols to f1.. by order
-                            for i, col in enumerate(column_names, start=1):
-                                keymap[col] = f"f{i}"
-                        for col in column_names:
-                            keymap.setdefault(col, col)
-                else:
-                    # No multi-row header -> keep previous (wide) behavior by position
-                    if csv_fields:
-                        orig_to_norm = oem2orm.normalizer.build_unique_column_map(
-                            csv_fields,
-                            normalizer=oem2orm.normalizer.COLUMN_NORMALIZER,
-                        )
-                        norm_by_index = [orig_to_norm[o] for o in csv_fields]
-                        for i, norm_name in enumerate(norm_by_index):
-                            if norm_name in column_names:
-                                keymap[norm_name] = f"f{i}"
-                    else:
-                        for i, col in enumerate(column_names):
-                            keymap[col] = f"f{i}"
-                    for col in column_names:
-                        keymap.setdefault(col, col)
-
-            # If we detected a multi-row header, drop those rows from the first data chunk
-            if header_from is not None and not header_rows_skipped and raw_batch:
-                raw_batch = raw_batch[header_skip_count:]
-                header_rows_skipped = True
-
-            # ====== BRANCH: LONG PIVOT ======
-            if header_from is not None and has_long_shape:
-                # Sanity defaults
-                use_time_key = "f0"  # first column in data rows
-                # For each row in this batch, emit one row per series column
-                out_rows: list[dict[str, Any]] = []
-                for r in raw_batch:
-                    ts_val = r.get(use_time_key)
-                    # skip blank lines
-                    if ts_val in (None, ""):
-                        continue
-                    # iterate all series columns f1..fN
-                    nkeys = len(r.keys())
-                    for j in range(1, nkeys):
-                        fj = f"f{j}"
-                        val = r.get(fj)
-                        # if completely empty, you can choose to skip
-                        # here we include to preserve NULLs unless you prefer to continue
-                        newrow: dict[str, Any] = {}
-
-                        # fill time
-                        if time_col:
-                            newrow[time_col] = ts_val
-                        # fill from/to/type normalized field names
-                        newrow[want_from] = header_from[j - 1] if j - 1 < len(header_from) else None
-                        newrow[want_to] = header_to[j - 1] if j - 1 < len(header_to) else None
-                        if want_type in db_cols_set:
-                            newrow[want_type] = header_type[j - 1] if j - 1 < len(header_type) else None
-
-                        # value
-                        newrow[value_col] = val
-                        out_rows.append(newrow)
-
-                if not out_rows:
-                    continue
-
-                if DRY_RUN:
-                    print(f"DRY_RUN: would POST {len(out_rows)} long rows")
-                else:
-                    status, payload = _TABLES.post_rows(schema, table, out_rows)
-                    if status not in (200, 201, 202):
-                        loggi.warning(RuntimeError(f"POST failed: {status} {payload}"))
-                    print(f"Uploaded {len(out_rows)} rows -> status {status}")
-                total_rows += len(out_rows)
-                continue  # next batch
-
-            # ====== BRANCH: WIDE (existing) ======
-            batch: list[dict] = []
-            for raw_row in raw_batch:
-                try:
-                    mapped = convert_row_passthrough(
-                        raw_row, column_names, required_nonnull, serial_pk, keymap
+                # wide mapping: multi-header fallback usually starts at f1
+                if header_ctx.has_multi and not shape.has_long_shape:
+                    keymap = _build_keymap_for_wide(
+                        column_names, norm_by_index, data_offset=1
                     )
-                except Exception as e:
-                    snippet = {k: raw_row.get(k) for k in list(raw_row.keys())[:10]}
-                    raise RuntimeError(
-                        f"Row conversion error in {csv_path.name}: {e}\n"
-                        f"Row head: {json.dumps(snippet, ensure_ascii=False)[:300]}..."
-                    ) from e
-                batch.append(mapped)
+                elif not header_ctx.has_multi:
+                    keymap = _build_keymap_for_wide(
+                        column_names, norm_by_index, data_offset=0
+                    )
+                else:
+                    # pivot mode: keymap unused, but keep a value
+                    keymap = {}
 
-            if not batch:
+            raw_batch = _skip_headers_if_needed(
+                raw_batch,
+                header_ctx,
+                csv_fields=csv_fields or None,
+                norm_by_index=norm_by_index,
+                column_names=column_names,
+            )
+            if not raw_batch:
                 continue
 
-            if DRY_RUN:
-                print(f"DRY_RUN: would POST batch of {len(batch)} rows")
-            else:
-                status, payload = _TABLES.post_rows(schema, table, batch)
-                if status not in (200, 201, 202):
-                    loggi.warning(RuntimeError(f"POST failed: {status} {payload}"))
-                print(f"Uploaded {len(batch)} rows -> status {status}")
-            total_rows += len(batch)
+            # LONG PIVOT
+            if header_ctx.has_multi and shape.has_long_shape:
+                out_rows = _emit_long_rows(
+                    raw_batch, header_ctx, shape, db_cols_set=db_cols_set
+                )
+                if not out_rows:
+                    continue
+                _post_rows(schema, table, out_rows)
+                total_rows += len(out_rows)
+                continue
 
+            # WIDE
+            assert keymap is not None
+            batch = _map_wide_rows(
+                raw_batch, column_names, required_nonnull, serial_pk, keymap, csv_path
+            )
+            if not batch:
+                continue
+            _post_rows(schema, table, batch)
+            total_rows += len(batch)
 
     print(f"Done: {table} uploaded {total_rows} rows total.")
 
@@ -709,8 +879,7 @@ def topo_sort_tables(idents: list[str], default_schema: str) -> list[str]:
 
     indeg = {n: 0 for n in nodes_fq}
     for n in nodes_fq:
-        for p in edges[n]:
-            indeg[n] += 1
+        indeg[n] = len(edges[n])
 
     q = deque([n for n, d in indeg.items() if d == 0])
     order_fq: list[str] = []
@@ -746,9 +915,7 @@ def upload_tables_in_fk_order(
         print(f"[override keys] {sorted(RESOURCES_BY_TABLE.keys())}")
 
     for t in ordered_tables:
-        schema, table = split_ident(
-            t, default_schema
-        )  # t is bare; schema becomes default
+        schema, table = split_ident(t, default_schema)
         override = RESOURCES_BY_TABLE.get(normalize_table_key(table), [])
         print(
             f"[upload] table='{table}' schema='{schema}' override_rows={len(override)}"
@@ -764,9 +931,6 @@ def upload_tabular_data() -> None:
     Convenience entry: read datapackage from config/env,
     derive tables, and upload in FK order.
     """
-    resources_by_table: dict[str, list[Resource]] | None = None
-    tables_input: list[str] = []
-
     oem_path = find_datapackage()
     if oem_path and oem_path.exists():
         resources_by_table = load_oem_resources(oem_path)
