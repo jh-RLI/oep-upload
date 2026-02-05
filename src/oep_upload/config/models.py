@@ -45,7 +45,7 @@ class FileSettings(BaseModel):
 class UploadSettings(BaseModel):
     batch_size: int = 5000
     dry_run: bool = False
-    default_schema: str = "model_draft"
+    default_schema: str = "data"
     max_retries: int = 5
     retry_base_delay: float = 1.5
     null_tokens: List[str] = ["", "null", "none", "na", "nan", "n/a"]
