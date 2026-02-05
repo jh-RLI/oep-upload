@@ -11,6 +11,9 @@ __pycache__/
 .vscode/settings.json
 .idea/
 .DS_Store
+build/
+dist/
+*.egg-info
 
 .env
 
