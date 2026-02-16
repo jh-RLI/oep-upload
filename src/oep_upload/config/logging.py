@@ -1,8 +1,11 @@
 import logging
 import logging.config
+from functools import lru_cache
+
 import yaml
 
 
+@lru_cache(maxsize=1)
 def setup_logging():
     try:
         with open("config/logging.yaml", "r", encoding="utf-8") as f:
