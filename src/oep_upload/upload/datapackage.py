@@ -873,24 +873,26 @@ def topo_sort_tables(idents: list[str], default_schema: str) -> list[str]:
     parents_map = {n: fk_parents_for_table(*n.split(".", 1)) for n in nodes_fq}
 
     node_set = set(nodes_fq)
-    edges = {
+    deps = {
         n: {p for p in parents if p in node_set} for n, parents in parents_map.items()
     }
 
-    indeg = {n: 0 for n in nodes_fq}
-    for n in nodes_fq:
-        indeg[n] = len(edges[n])
+    indeg = {n: len(deps[n]) for n in nodes_fq}
 
-    q = deque([n for n, d in indeg.items() if d == 0])
+    dependents: dict[str, list[str]] = defaultdict(list)
+    for child, parents in deps.items():
+        for parent in parents:
+            dependents[parent].append(child)
+
+    q = deque(n for n in nodes_fq if indeg[n] == 0)
     order_fq: list[str] = []
     while q:
         n = q.popleft()
         order_fq.append(n)
-        for m in nodes_fq:
-            if n in edges[m]:
-                indeg[m] -= 1
-                if indeg[m] == 0:
-                    q.append(m)
+        for child in dependents[n]:
+            indeg[child] -= 1
+            if indeg[child] == 0:
+                q.append(child)
 
     if len(order_fq) != len(nodes_fq):
         cycle = [n for n in nodes_fq if indeg[n] > 0]
