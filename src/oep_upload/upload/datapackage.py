@@ -36,8 +36,11 @@ MAX_RETRIES: int = int(_s.upload.max_retries)
 RETRY_BASE_DELAY: float = float(_s.upload.retry_base_delay)
 DEFAULT_SCHEMA: str = _s.upload.default_schema
 
-# Null tokens
-NULL_TOKENS: set[str] = set(map(lambda s: s.lower(), _s.upload.null_tokens))
+# Null tokens (include both lowercase and original forms for O(1) lookup without .lower())
+_raw_null_tokens = _s.upload.null_tokens
+NULL_TOKENS: frozenset[str] = frozenset(
+    t for tok in _raw_null_tokens for t in (tok, tok.lower(), tok.upper(), tok.title())
+)
 
 # Paths
 ROOT = Path(_s.paths.root).resolve()
@@ -345,18 +348,18 @@ def stream_csv_batches(
 # =========================
 # PASS-THROUGH MAPPER
 # =========================
+_COMPOSITE_OPEN = frozenset("[{")
+
+
 def _parse_composite_string(s: str) -> Any:
-    txt = s.strip()
-    if not txt:
-        return s
-    if (txt[0], txt[-1]) not in {("[", "]"), ("{", "}")}:
+    if not s or s[0] not in _COMPOSITE_OPEN:
         return s
     try:
-        return json.loads(txt)
+        return json.loads(s)
     except json.JSONDecodeError:
         pass
     try:
-        val = ast.literal_eval(txt)
+        val = ast.literal_eval(s)
         if isinstance(val, (list, dict)):
             return val
     except (ValueError, SyntaxError):
@@ -378,10 +381,12 @@ def convert_row_passthrough(
 
         if isinstance(v, str):
             s = v.strip()
-            if s.lower() in NULL_TOKENS:
+            if s in NULL_TOKENS:
                 v = None
-            else:
+            elif s and s[0] in _COMPOSITE_OPEN:
                 v = _parse_composite_string(s)
+            else:
+                v = s
 
         out[col] = v
 
