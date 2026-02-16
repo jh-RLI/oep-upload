@@ -19,7 +19,7 @@ import oem2orm
 import oem2orm.normalizer
 
 from oep_upload.config import get_settings, export_env_vars
-from oep_upload.api.oep import TablesService, OEPApiClient
+from oep_upload.api.oep import TablesService
 from oep_upload.config.logging import setup_logging
 
 # =========================
@@ -50,7 +50,14 @@ OEM_FILE = (
 
 # Global override map (filled later)
 RESOURCES_BY_TABLE: dict[str, list["Resource"]] = {}
-_TABLES = TablesService(OEPApiClient.from_settings())
+_TABLES: TablesService | None = None
+
+
+def _get_tables_service() -> TablesService:
+    global _TABLES
+    if _TABLES is None:
+        _TABLES = TablesService()
+    return _TABLES
 
 # Try to mirror the normalizer’s max column length for suffix truncation (safety)
 try:
@@ -496,7 +503,7 @@ def _get_tabular_resources(
     if not tabulars and RESOURCES_BY_TABLE:
         tabulars = RESOURCES_BY_TABLE.get(bare_key, [])
     if not tabulars:
-        meta = _TABLES.get_table_meta(schema, table)
+        meta = _get_tables_service().get_table_meta(schema, table)
         tabulars = find_tabulars_in_meta(meta)
 
     if not tabulars:
@@ -506,7 +513,7 @@ def _get_tabular_resources(
 
 
 def _get_table_columns(schema: str, table: str) -> tuple[list[str], set[str], bool]:
-    info = _TABLES.get_table_info(schema, table)
+    info = _get_tables_service().get_table_info(schema, table)
     columns: dict[str, dict] = info["columns"]
     column_names = list(columns.keys())
 
@@ -742,7 +749,7 @@ def _post_rows(schema: str, table: str, rows: list[dict[str, Any]]) -> None:
         print(f"DRY_RUN: would POST {len(rows)} rows")
         return
 
-    status, payload = _TABLES.post_rows(schema, table, rows)
+    status, payload = _get_tables_service().post_rows(schema, table, rows)
     if status not in (200, 201, 202):
         loggi.warning(RuntimeError(f"POST failed: {status} {payload}"))
     print(f"Uploaded {len(rows)} rows -> status {status}")
@@ -851,7 +858,7 @@ FK_DEF_RE = re.compile(
 
 
 def fk_parents_for_table(schema: str, table: str) -> set[str]:
-    info = _TABLES.get_table_info(schema, table)
+    info = _get_tables_service().get_table_info(schema, table)
     parents: set[str] = set()
     for _, c in (info.get("constraints") or {}).items():
         if (c.get("constraint_type") or "").upper() == "FOREIGN KEY":

@@ -113,8 +113,14 @@ class OEPApiClient:
         )
 
 
-# Singleton client you can import if you like
-_api_client = OEPApiClient.from_settings()
+_api_client: OEPApiClient | None = None
+
+
+def get_api_client() -> OEPApiClient:
+    global _api_client
+    if _api_client is None:
+        _api_client = OEPApiClient.from_settings()
+    return _api_client
 
 
 # ======================================================================
@@ -129,7 +135,7 @@ class TablesService:
     """
 
     def __init__(self, client: OEPApiClient | None = None):
-        self.client = client or _api_client
+        self.client = client or get_api_client()
 
     def get_table_info(self, schema: str, table: str) -> Dict[str, Any]:
         return self.client.get_json("schema", schema, "tables", table)
@@ -166,7 +172,7 @@ class DatasetsService:
     """
 
     def __init__(self, client: OEPApiClient | None = None):
-        self.client = client or _api_client
+        self.client = client or get_api_client()
 
     def get_dataset(self, name: str) -> Optional[Dict[str, Any]]:
         try:
@@ -252,7 +258,7 @@ def ensure_dataset_from_datapackage(
     2) Ensure dataset exists (GET/POST).
     3) Optionally assign 'resources' to dataset using {schema,name}.
     """
-    client = client or _api_client
+    client = client or get_api_client()
     ds_service = DatasetsService(client)
 
     p = _resolve_oem_path(datapackage_path)
