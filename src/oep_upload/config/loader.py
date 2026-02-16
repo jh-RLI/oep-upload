@@ -143,7 +143,13 @@ def get_settings(
     return _build_settings(cfg_dir_str, env_file_str, env_name_eff, single_yaml_str)
 
 
+_env_vars_exported = False
+
+
 def export_env_vars(s: Settings) -> None:
+    global _env_vars_exported
+    if _env_vars_exported:
+        return
     os.environ["ENV"] = s.env
     os.environ["OEP_API_TOKEN"] = s.effective_api_token or ""
     os.environ["OEP_API_TOKEN_LOCAL"] = s.effective_api_token or ""
@@ -153,4 +159,4 @@ def export_env_vars(s: Settings) -> None:
     os.environ["OEP_OEM_FILE"] = s.paths.datapackage_file or ""
     if s.oep_user:
         os.environ["OEP_USER"] = s.oep_user
-    # os.environ[]
+    _env_vars_exported = True
