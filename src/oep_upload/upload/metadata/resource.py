@@ -6,7 +6,6 @@ from oemetadata.v2.v20.example import OEMETADATA_V20_EXAMPLE
 from oemetadata.v2.v20.template import OEMETADATA_V20_TEMPLATE
 
 import json
-import re
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +13,7 @@ from typing import Optional, Any, Iterable
 
 from oep_upload.config import get_settings, export_env_vars
 from oep_upload.config.logging import setup_logging
+from oep_upload.utils import is_blank, slugify
 
 # Resolve selected datapackage dir
 from oep_upload.describe.csv_file import _resolve_package_root_from_hint
@@ -33,17 +33,6 @@ class UploadResult:
     resource_name: str
     status: str  # "uploaded" | "skipped" | "error"
     detail: str = ""
-
-
-def _is_blank(v) -> bool:
-    return not isinstance(v, str) or v.strip() == ""
-
-
-def _slugify(s: str) -> str:
-    s = s.strip().lower().replace(" ", "-")
-    s = re.sub(r"[^\w\-]+", "-", s)
-    s = re.sub(r"-{2,}", "-", s).strip("-")
-    return s or "_empty_"
 
 
 def _choose_datapackage_file(package_root: Path) -> Path:
@@ -256,7 +245,7 @@ def _assemble_resource_metadata(
     pkg_title = pkg.get("title") or pkg_name or package_root.name
 
     md["@id"] = pkg.get("id") or pkg.get("@id")  # optional
-    md["name"] = pkg_name or _slugify(package_root.name)
+    md["name"] = pkg_name or slugify(package_root.name, fallback="_empty_")
     md["title"] = pkg_title
     md["description"] = pkg.get("description")
 
@@ -272,9 +261,9 @@ def _assemble_resource_metadata(
     r = deepcopy(resource)
 
     # prefill name/title before normalization
-    if _is_blank(r.get("name")) and isinstance(r.get("path"), str):
-        r["name"] = _slugify(Path(r["path"]).stem)
-    if _is_blank(r.get("title")):
+    if is_blank(r.get("name")) and isinstance(r.get("path"), str):
+        r["name"] = slugify(Path(r["path"]).stem, fallback="_empty_")
+    if is_blank(r.get("title")):
         r["title"] = r.get("name") or "resource"
 
     # 1) Normalize schema (fields + PK/FK)
@@ -310,7 +299,7 @@ def _extract_table_identifier(resource: dict) -> Optional[str]:
     Return the *normalized* table identifier (matches created tables).
     """
     name = resource.get("name")
-    if _is_blank(name):
+    if is_blank(name):
         return None
     return norm.TABLE_NORMALIZER(str(name))
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import argparse
 import hashlib
 import json
@@ -12,6 +11,7 @@ from typing import Iterable, Optional
 
 from oep_upload.config import get_settings, export_env_vars
 from oep_upload.config.logging import setup_logging
+from oep_upload.utils import is_blank, slugify
 
 from omi.inspection import infer_metadata, InspectionError
 
@@ -35,17 +35,6 @@ class PackageSelectError(Exception):
 # -----------------------
 # Utilities
 # -----------------------
-
-
-def _is_blank(v) -> bool:
-    return not isinstance(v, str) or v.strip() == ""
-
-
-def _slugify_name(s: str) -> str:
-    s = s.strip().lower().replace(" ", "-")
-    s = re.sub(r"[^\w\-]+", "-", s)
-    s = re.sub(r"-{2,}", "-", s).strip("-")
-    return s or "resource"
 
 
 def _to_posix(p: Path, base: Path) -> str:
@@ -246,8 +235,8 @@ def _ensure_resource_name(meta: dict, csv_path: Path, package_root: Path) -> Non
             res = meta["resources"][0]
 
             # If name missing or blank, set from filename stem (slugified)
-            if _is_blank(res.get("name")):
-                res["name"] = _slugify_name(csv_path.stem)
+            if is_blank(res.get("name")):
+                res["name"] = slugify(csv_path.stem)
 
             # Always ensure path is relative POSIX ("data/.../file.csv")
             res["path"] = _to_posix(csv_path, package_root)
