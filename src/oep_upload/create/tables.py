@@ -27,14 +27,7 @@ def create_tables_on_oedb(metadata_folder_name: Path):
 
 if __name__ == "__main__":
 
-    ROOT = Path(settings.paths.root).resolve()
-    DATA_ROOT = (ROOT / settings.paths.data_dir).resolve()
-    OEM_FILE = (
-        (DATA_ROOT / settings.paths.datapackage_file).resolve()
-        if settings.paths.datapackage_file
-        else None
-    )
+    DATA_ROOT = settings.paths.resolved_data_dir
 
-    path = Path(DATA_ROOT)
-    print(path)
-    create_tables_on_oedb(path)
+    print(DATA_ROOT)
+    create_tables_on_oedb(DATA_ROOT)
