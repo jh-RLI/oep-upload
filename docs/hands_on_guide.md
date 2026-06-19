@@ -25,11 +25,32 @@ The upload of data to the OEP using the API requires some settings, most of them
 
 - Find the file ".env.example" in the root of the tool directory, copy it and rename it to .env
 - Add yor OEP-API token there under "OEP_API_TOKEN"
-- Find the file "settings.base.yaml" at "src/oep_upload/config/settings.base.yaml". Currently you must add your data source paths here. (This will change in the future to be more user friendly) 
-  
-  - Add the base path to your datapackage as absolute path like: `root: /home/jh/github/oep-upload/data/test_data/`
-  - Add the absolute path to the directory where your data is, in most cases this is the same as `root: data_dir: /home/jh/github/oep-upload/data/test_data/`
-  - Add the absolute path to the datapackage JSON file which should be in root directory: `datapackage_file: /home/jh/github/oep-upload/data/test_data/datapackage.json`
+- Tell the tool where your data lives. Settings are layered with this precedence
+  (lowest to highest): `settings.base.yaml` < `settings.<env>.yaml` <
+  `settings.local.yaml` < environment variables / `.env`. The shared
+  `settings.base.yaml` should stay generic — put **your machine-specific paths**
+  in `settings.local.yaml` (next to it under `src/oep_upload/config/`), which is
+  gitignored and never committed.
+
+  Create `src/oep_upload/config/settings.local.yaml` with your paths:
+
+  ```yaml
+  api:
+    target: remote   # or "local" if you run a local OEP
+
+  paths:
+    # Folder that holds your datapackage. Relative paths are resolved from where
+    # you run the tool (usually the repo root). `~` and $ENV_VARS are expanded.
+    root: data/my_dataset
+    # Optional: where the data files are, relative to root (defaults to root).
+    # data_dir: .
+    # Optional: the datapackage.json, relative to data_dir (or absolute).
+    datapackage_file: datapackage.json
+  ```
+
+  You only need `root` in the simple case. `data_dir` and `datapackage_file` are
+  resolved relative to `root`; giving an absolute value simply overrides the
+  parent. No more fighting with leading/trailing slashes.
 
 ## 3 Run the tool
 
