@@ -81,8 +81,8 @@ def _write_json_pretty(p: Path, data: dict) -> None:
 
 
 def _validate_and_resolve_roots() -> tuple[Path, Path]:
-    ROOT = Path(settings.paths.root).expanduser().resolve()
-    DATA_ROOT = (ROOT / settings.paths.data_dir).expanduser().resolve()
+    ROOT = settings.paths.resolved_root
+    DATA_ROOT = settings.paths.resolved_data_dir
 
     log.info("Configured ROOT: %s", ROOT)
     log.info("Configured DATA_ROOT: %s", DATA_ROOT)
