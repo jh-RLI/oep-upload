@@ -1,4 +1,3 @@
-from pathlib import Path
 import sys
 
 from oep_upload.config.logging import setup_logging
@@ -24,6 +23,8 @@ if __name__ == "__main__":
     loggi = setup_logging()
     settings = get_settings()
     export_env_vars(settings)  # keep compatibility with code using env vars
+    # Re-apply logging now that the configured level is known.
+    loggi = setup_logging(level=settings.app.log_level, force=True)
 
     loggi.info(
         "Starting with target=%s, base_url=%s",
@@ -60,7 +61,7 @@ if __name__ == "__main__":
     #    If you want to override, set `path = Path('datapackages/example')` etc.
     # ------------------------------------------------------------------
     try:
-        path = Path(settings.paths.data_dir)
+        path = settings.paths.resolved_data_dir
         loggi.info("Creating tables on OEP from directory: %s", path)
         create_tables_on_oedb(path)
     except Exception as e:

@@ -17,4 +17,7 @@ dist/
 
 .env
 
+# Machine-specific settings overrides (never commit personal paths/secrets)
+settings.local.yaml
+
 oep_upload.egg-info

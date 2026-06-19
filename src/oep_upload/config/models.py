@@ -1,5 +1,13 @@
+import os
+from pathlib import Path
 from typing import Literal, Optional, List
-from pydantic import BaseModel, AnyUrl, field_validator
+from pydantic import (
+    BaseModel,
+    AnyUrl,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,12 +16,18 @@ class Endpoint(BaseModel):
     api_base_url: AnyUrl
     protocol: Literal["http", "https"] | None = None
 
-    @field_validator("protocol", mode="before")
-    @classmethod
-    def derive_protocol(cls, v, values):
-        if v is None and (u := values.get("api_base_url")):
-            return u.scheme
-        return v
+    @model_validator(mode="after")
+    def derive_protocol(self):
+        # Fill protocol from the URL scheme when it isn't set explicitly.
+        # Runs even when `protocol` is left at its default (unlike a field
+        # validator), so a config that omits `protocol` still works.
+        if self.protocol is None and self.api_base_url is not None:
+            scheme = getattr(self.api_base_url, "scheme", None) or str(
+                self.api_base_url
+            ).split("://", 1)[0]
+            if scheme in ("http", "https"):
+                self.protocol = scheme
+        return self
 
 
 class APISettings(BaseModel):
@@ -30,11 +44,50 @@ class AppSettings(BaseModel):
 
 
 class PathsSettings(BaseModel):
-    root: str = "."
-    data_dir: str = "data"
-    datapackage_file: Optional[str] = (
-        None  # e.g. data/datapackages/example/oed_example.json
-    )
+    """Filesystem locations for the datapackage being processed.
+
+    All three values accept ``~`` and ``$ENV_VAR`` references and may be given
+    either as absolute paths or relative to the directory you run the tool
+    from. ``data_dir`` and ``datapackage_file`` are resolved *relative to*
+    ``root`` (an absolute value simply overrides ``root``), so in the common
+    case you only need to set ``root``.
+
+    Use the ``resolved_*`` properties instead of joining these by hand — they
+    centralize expansion, joining and trailing-slash handling in one place.
+    """
+
+    root: str = "data"
+    data_dir: Optional[str] = None
+    datapackage_file: Optional[str] = None
+
+    @field_validator("root", "data_dir", "datapackage_file", mode="before")
+    @classmethod
+    def _clean_path(cls, v, info: ValidationInfo):
+        if v is None:
+            return None
+        s = str(v).strip()
+        if not s:
+            # root must always have a value; the others are optional.
+            return "data" if info.field_name == "root" else None
+        return os.path.expanduser(os.path.expandvars(s))
+
+    @property
+    def resolved_root(self) -> Path:
+        return Path(self.root).expanduser().resolve()
+
+    @property
+    def resolved_data_dir(self) -> Path:
+        # An absolute data_dir overrides root; a relative one is joined to it.
+        if self.data_dir:
+            return (self.resolved_root / self.data_dir).resolve()
+        return self.resolved_root
+
+    @property
+    def resolved_datapackage_file(self) -> Optional[Path]:
+        # Absolute datapackage_file overrides data_dir; relative is joined to it.
+        if self.datapackage_file:
+            return (self.resolved_data_dir / self.datapackage_file).resolve()
+        return None
 
 
 class FileSettings(BaseModel):
@@ -75,10 +128,10 @@ class Settings(BaseSettings):
 
     @property
     def effective_api_token(self) -> Optional[str]:
+        # For a local OEP prefer the dedicated local token, but fall back to
+        # the main token so users don't have to set both for simple setups.
         if self.api.target == "local":
-            return self.oep_api_token_local
-        if self.api.target == "production":
-            return self.oep_api_token
+            return self.oep_api_token_local or self.oep_api_token
         return self.oep_api_token
 
     @property

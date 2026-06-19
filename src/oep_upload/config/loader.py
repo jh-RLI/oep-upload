@@ -51,9 +51,13 @@ class YamlSettingsSource(PydanticBaseSettingsSource):
         if self.single_yaml:
             self._data = _read_yaml(self.single_yaml)
         else:
+            # Precedence (lowest -> highest): base < env-specific < local.
+            # settings.local.yaml is gitignored and holds machine-specific
+            # overrides (paths, target, ...) so users never edit tracked files.
             base = _read_yaml(self.cfg_dir / "settings.base.yaml")
             env = _read_yaml(self.cfg_dir / f"settings.{self.env_name}.yaml")
-            self._data = _deep_merge(base, env)
+            local = _read_yaml(self.cfg_dir / "settings.local.yaml")
+            self._data = _deep_merge(_deep_merge(base, env), local)
 
     def get_field_value(self, field, field_name: str):
         if isinstance(self._data, dict) and field_name in self._data:
@@ -122,7 +126,16 @@ def _build_settings(
 
     s = AppSettings()
     if not s.effective_api_token:
-        raise RuntimeError("OEP_API_TOKEN is required in production.")
+        token_hint = (
+            "OEP_API_TOKEN_LOCAL (or OEP_API_TOKEN)"
+            if s.api.target == "local"
+            else "OEP_API_TOKEN"
+        )
+        raise RuntimeError(
+            f"No OEP API token found for target='{s.api.target}'. "
+            f"Set {token_hint} in your .env file (copy .env.example to .env). "
+            "You can find your token in your OEP profile settings."
+        )
     return s
 
 
@@ -145,6 +158,7 @@ def get_settings(
 
 def export_env_vars(s: Settings) -> None:
     os.environ["ENV"] = s.env
+    os.environ["OEP_LOG_LEVEL"] = s.app.log_level
     os.environ["OEP_API_TOKEN"] = s.effective_api_token or ""
     os.environ["OEP_API_TOKEN_LOCAL"] = s.effective_api_token or ""
     os.environ["OEP_API_URL"] = str(s.endpoint.api_base_url)

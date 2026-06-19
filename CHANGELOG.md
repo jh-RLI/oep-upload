@@ -1,0 +1,78 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- **Layered, machine-local config**: a new gitignored `settings.local.yaml`
+  layer for machine-specific overrides. Settings now merge with the precedence
+  `settings.base.yaml < settings.<env>.yaml < settings.local.yaml < env vars / .env`.
+- **Path expansion and resolution helpers** on `PathsSettings`: `root`,
+  `data_dir` and `datapackage_file` now expand `~` and `$ENV_VARS`, tolerate
+  whitespace/empty values, and expose `resolved_root`, `resolved_data_dir` and
+  `resolved_datapackage_file` properties that centralize all path joining.
+  `data_dir`/`datapackage_file` resolve relative to `root` (absolute overrides).
+- **Configurable, level-aware logging**: `setup_logging()` honors the configured
+  log level (argument → `OEP_LOG_LEVEL`/`LOG_LEVEL` → `INFO`), loads an optional
+  `logging.yaml` if present, and is now idempotent.
+- **Test suite** (`tests/`, pytest via `uv`): 28 tests covering path validators
+  and resolution, token selection, endpoint protocol derivation, the layered
+  YAML loader and its precedence, and logging behavior. Added `pytest` as a dev
+  dependency and pytest configuration in `pyproject.toml`.
+- **Documentation**: new `docs/usage.md` straightforward getting-started guide.
+
+### Changed
+
+- `settings.base.yaml` is now generic and safe to commit — relative `root: data`,
+  `target: remote`, and documented options. Personal/absolute paths belong in
+  `settings.local.yaml`.
+- All consumers (`main.py`, `describe`, `upload`, `create`) use the new
+  `resolved_*` path properties instead of each re-implementing `root / data_dir`
+  joins.
+- `main.py` re-applies logging once settings are loaded so `app.log_level` takes
+  effect; `export_env_vars` now exports `OEP_LOG_LEVEL`.
+- Clearer error when no API token is found — names the exact variable to set for
+  the active `api.target` instead of "OEP_API_TOKEN is required in production".
+- Updated `docs/hands_on_guide.md` to describe `settings.local.yaml` and relative
+  paths instead of editing absolute paths into the shared `settings.base.yaml`.
+
+### Fixed
+
+- **`effective_api_token` dead branch**: removed the unreachable
+  `api.target == "production"` check (`target` is only `remote`/`local`). For a
+  `local` target it now prefers `OEP_API_TOKEN_LOCAL` and falls back to
+  `OEP_API_TOKEN`.
+- **Endpoint protocol derivation never ran**: the `protocol` field was never
+  derived from the URL when left unset (a `mode="before"` field validator does
+  not run on default values). Reimplemented as a `model_validator(mode="after")`
+  that derives `http`/`https` from `api_base_url`.
+- **CSV encoding crashes during metadata inference**: the describe step now
+  retries against a UTF-8 normalized copy when Frictionless/omi mis-detects the
+  encoding (e.g. cp1252 on Windows) and fails on a stray byte such as `0x9d`.
+  Tries the configured `files.encoding`, then UTF-8, cp1252 and Latin-1.
+- **Logging fallback**: previously always fell back to a bare `basicConfig`
+  (the referenced `config/logging.yaml` did not exist) and re-configured the
+  stack on every import. Now configures once and respects the chosen level.
+- Renamed the example environment file `.env.exmple` → `.env.example` to match
+  the README and guides.
+- `tools/xls_to_csv` usage is now documented with its required extra
+  dependencies (`pandas`, `openpyxl`).
+
+### Known issues / not yet addressed
+
+- `tools/xls_to_csv.py` depends on `pandas` and `openpyxl`, which are not
+  declared in project dependencies (install them manually, or they should be
+  added as an optional dependency group).
+- `[tool.setuptools.package-data]` globs `config/*.yaml`, which can bundle a
+  developer's `settings.local.yaml` into a built wheel; consider excluding it.
+- `.pre-commit-config.yaml` defines three separate top-level `repos:` keys (only
+  the last is used) and references `requirements.in`/`requirements.txt` that do
+  not exist.
+- `upload/null_type_helpers.py` is currently unused by the upload pipeline.
+- The dataset creation/assignment helpers in `api/oep.py`
+  (`ensure_dataset_from_datapackage`) are not wired into `main.py`.

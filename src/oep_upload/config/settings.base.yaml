@@ -1,3 +1,9 @@
+# Base configuration shared by everyone. Do NOT put machine-specific paths or
+# secrets here. Override per environment in settings.dev.yaml / settings.prod.yaml,
+# and put your personal paths/target in settings.local.yaml (gitignored).
+#
+# Precedence (lowest -> highest): base < env-specific < local < env vars / .env
+
 app:
   name: oep-uploader
   timezone: Europe/Berlin
@@ -5,7 +11,8 @@ app:
 
 api:
   timeout_s: 30
-  target: local   # remote | local
+  # Which OEP instance to talk to: remote (openenergyplatform.org) | local
+  target: remote
 
   remote:
     host: openenergyplatform.org
@@ -17,11 +24,16 @@ api:
     api_base_url: http://localhost:8000/api/v0/
     protocol: http
 
-oep:
-  user: Jonas.Huber
-  # Either provide a token here or in the .env file as OEP_API_TOKEN
-
 paths:
-  root: .
-  data_dir: data/preprocessed
-  datapackage_file: data/datapackages/preprocessed/datapackage.json
+  # Folder that holds your datapackage. Relative paths are resolved from the
+  # directory you run the tool from (usually the repo root). `~` and $ENV_VARS
+  # are expanded. For machine-specific paths use settings.local.yaml so they
+  # stay out of version control.
+  root: data
+
+  # Optional. Sub-path of `root` that holds the data (defaults to `root`).
+  # An absolute value overrides `root`.
+  # data_dir: my_dataset
+
+  # Optional. Path to the datapackage.json, relative to `data_dir` (or absolute).
+  # datapackage_file: datapackage.json

@@ -40,13 +40,9 @@ DEFAULT_SCHEMA: str = _s.upload.default_schema
 NULL_TOKENS: set[str] = set(map(lambda s: s.lower(), _s.upload.null_tokens))
 
 # Paths
-ROOT = Path(_s.paths.root).resolve()
-DATA_ROOT = (ROOT / _s.paths.data_dir).resolve()
-OEM_FILE = (
-    (DATA_ROOT / _s.paths.datapackage_file).resolve()
-    if _s.paths.datapackage_file
-    else None
-)
+ROOT = _s.paths.resolved_root
+DATA_ROOT = _s.paths.resolved_data_dir
+OEM_FILE = _s.paths.resolved_datapackage_file
 
 # Global override map (filled later)
 RESOURCES_BY_TABLE: dict[str, list["Resource"]] = {}
@@ -148,7 +144,7 @@ def load_oem_resources(oem_path: Path) -> dict[str, list[Resource]]:
             continue
 
         # used for delimiter guessing only; actual path resolution later
-        full_path = Path(_s.paths.data_dir, path)
+        full_path = DATA_ROOT / path
 
         dialect = res.get("dialect") if isinstance(res.get("dialect"), dict) else {}
         if dialect:
