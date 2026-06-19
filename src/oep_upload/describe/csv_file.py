@@ -6,6 +6,7 @@ import re
 import argparse
 import hashlib
 import json
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
@@ -263,6 +264,52 @@ def _ensure_resource_name(meta: dict, csv_path: Path, package_root: Path) -> Non
 # -----------------------
 
 
+def _candidate_encodings() -> list[str]:
+    """Encodings to try when normalizing a CSV, configured one first."""
+    encs: list[str] = []
+    cfg_enc = getattr(getattr(settings, "files", None), "encoding", None)
+    if isinstance(cfg_enc, str) and cfg_enc.strip():
+        encs.append(cfg_enc.strip())
+    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        if enc not in encs:
+            encs.append(enc)
+    return encs
+
+
+def _transcode_to_utf8(csv_path: Path) -> Path:
+    """
+    Read a CSV with a best-effort encoding chain and write a UTF-8 copy.
+
+    Frictionless encoding auto-detection (used by omi) can mis-guess the encoding
+    (commonly cp1252 on Windows) and crash on a stray byte. Normalizing to
+    UTF-8 lets inference proceed. ``latin-1`` is the final fallback because it
+    maps every byte, so decoding never fails (a wrong glyph in the data does
+    not affect field-name/type inference).
+    """
+    raw = csv_path.read_bytes()
+    text: str | None = None
+    used = "latin-1"
+    for enc in _candidate_encodings():
+        try:
+            text = raw.decode(enc)
+            used = enc
+            break
+        except (UnicodeDecodeError, LookupError):
+            continue
+    if text is None:
+        text = raw.decode("latin-1", errors="replace")
+    log.info("Re-reading %s as %s and normalizing to UTF-8.", csv_path.name, used)
+
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".csv", encoding="utf-8", delete=False, newline=""
+    )
+    try:
+        tmp.write(text)
+    finally:
+        tmp.close()
+    return Path(tmp.name)
+
+
 def generate_datapackage_for_csv(
     csv_path: Path, package_root: Path, metadata_format: str = "OEP"
 ) -> dict:
@@ -273,12 +320,29 @@ def generate_datapackage_for_csv(
     log.debug("Inferring metadata for %s", csv_path)
     try:
         inferred = infer_metadata(str(csv_path), metadata_format=metadata_format)
-        _ensure_resource_name(inferred, csv_path, package_root)
-        return inferred
     except InspectionError:
         raise
     except Exception as e:
-        raise InspectionError(f"Inference failed for {csv_path}: {e}") from e
+        # Most often an encoding mis-detection (e.g. 'charmap'/cp1252 on
+        # Windows). Retry against a UTF-8 normalized copy before giving up.
+        log.warning(
+            "Inference for %s failed (%s); retrying with a UTF-8 copy.", csv_path, e
+        )
+        tmp_path: Path | None = None
+        try:
+            tmp_path = _transcode_to_utf8(csv_path)
+            inferred = infer_metadata(str(tmp_path), metadata_format=metadata_format)
+        except Exception as e2:
+            raise InspectionError(f"Inference failed for {csv_path}: {e2}") from e2
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
+    _ensure_resource_name(inferred, csv_path, package_root)
+    return inferred
 
 
 def _maybe_backup_existing(original: Path) -> None:

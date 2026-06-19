@@ -170,6 +170,13 @@ make sure the path exists.
 Each resource in your `datapackage.json` needs a relative `path` to its CSV file,
 e.g. `"path": "data/table_one.csv"`.
 
+**"'charmap' codec can't decode byte ..." during the describe step**
+This is a CSV encoding mismatch (common on Windows). The tool now automatically
+retries by normalizing the file to UTF-8, so it should recover on its own. If a
+file still fails, save it as UTF-8 (e.g. "UTF-8" in Excel's *Save As*, or set
+`files.encoding` in `settings.local.yaml`). These describe-step errors are
+non-fatal: if a valid `datapackage.json` already exists, the upload continues.
+
 **Want more detail in the logs?**
 Set `app.log_level: DEBUG` in `settings.local.yaml`, or `LOG_LEVEL=DEBUG` in `.env`.
 

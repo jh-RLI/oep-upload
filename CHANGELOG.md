@@ -51,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   derived from the URL when left unset (a `mode="before"` field validator does
   not run on default values). Reimplemented as a `model_validator(mode="after")`
   that derives `http`/`https` from `api_base_url`.
+- **CSV encoding crashes during metadata inference**: the describe step now
+  retries against a UTF-8 normalized copy when Frictionless/omi mis-detects the
+  encoding (e.g. cp1252 on Windows) and fails on a stray byte such as `0x9d`.
+  Tries the configured `files.encoding`, then UTF-8, cp1252 and Latin-1.
 - **Logging fallback**: previously always fell back to a bare `basicConfig`
   (the referenced `config/logging.yaml` did not exist) and re-configured the
   stack on every import. Now configures once and respects the chosen level.
