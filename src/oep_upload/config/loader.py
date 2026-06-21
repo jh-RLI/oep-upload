@@ -125,6 +125,15 @@ def _build_settings(
             )
 
     s = AppSettings()
+
+    # Pin the reported environment to the one we actually loaded. Without this,
+    # `s.env` could keep its model default ('dev') while we loaded 'prod', and
+    # export_env_vars() would then write ENV=dev — flipping a later
+    # get_settings() onto the dev/local target. Keep them consistent so repeated
+    # loads (every submodule import calls get_settings) are stable.
+    if env_name in ("dev", "prod", "test"):
+        s.env = env_name
+
     if not s.effective_api_token:
         token_hint = (
             "OEP_API_TOKEN_LOCAL (or OEP_API_TOKEN)"
