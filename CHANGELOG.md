@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   derived from the URL when left unset (a `mode="before"` field validator does
   not run on default values). Reimplemented as a `model_validator(mode="after")`
   that derives `http`/`https` from `api_base_url`.
+- **Environment flipped to dev/local by default**: with `ENV` unset the loader
+  loaded `prod` (remote) but the `env` field defaulted to `dev`, which
+  `export_env_vars` wrote back to `ENV`, so the next `get_settings()` (triggered
+  by every submodule import) reloaded `dev` and silently targeted `localhost`.
+  The reported `env` is now pinned to the environment actually loaded, and the
+  `env` field defaults to `prod` to match the loader.
 - **CSV encoding crashes during metadata inference**: the describe step now
   retries against a UTF-8 normalized copy when Frictionless/omi mis-detects the
   encoding (e.g. cp1252 on Windows) and fails on a stray byte such as `0x9d`.
