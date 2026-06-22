@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import textwrap
 
 import pytest
 
-from oep_upload.config.loader import _build_settings, get_settings
+from oep_upload.config.loader import _build_settings, export_env_vars, get_settings
 
 BASE_YAML = """\
 app:
@@ -73,6 +74,33 @@ def test_deep_merge_keeps_untouched_keys(tmp_path):
     # local only set data_dir; root from base must survive the merge
     assert s.paths.root == "data"
     assert s.paths.data_dir == "sub"
+
+
+def test_env_does_not_flip_to_dev_after_export(tmp_path, monkeypatch):
+    # Regression: with no ENV set, the first load uses 'prod' (remote). If the
+    # reported env diverged ('dev') and was exported, a later reload would flip
+    # onto dev/local. Loads must stay on 'prod'/remote.
+    monkeypatch.delenv("ENV", raising=False)
+    _write(tmp_path, "settings.base.yaml", BASE_YAML)
+    _write(tmp_path, "settings.prod.yaml", "api:\n  target: remote\n")
+    _write(tmp_path, "settings.dev.yaml", "api:\n  target: local\n")
+    fake_env = tmp_path / "none.env"
+
+    try:
+        s1 = get_settings(config_dir=tmp_path, env_file=str(fake_env))
+        assert s1.api.target == "remote"
+        assert s1.env == "prod"  # reported env matches the loaded one
+
+        export_env_vars(s1)
+        assert os.environ.get("ENV") == "prod"
+
+        # Force a real reload, as a fresh submodule import would.
+        _build_settings.cache_clear()
+        s2 = get_settings(config_dir=tmp_path, env_file=str(fake_env))
+        assert s2.api.target == "remote"
+        assert s2.endpoint.host == "openenergyplatform.org"
+    finally:
+        os.environ.pop("ENV", None)
 
 
 def test_missing_token_raises_helpful_error(tmp_path, monkeypatch):

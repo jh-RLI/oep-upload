@@ -111,7 +111,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    env: Literal["dev", "prod", "test"] = "dev"
+    env: Literal["dev", "prod", "test"] = "prod"
     app: AppSettings
     api: APISettings
     paths: PathsSettings = PathsSettings()
