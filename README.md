@@ -1,5 +1,3 @@
-!!! Currently depends on the unreleased dev branch of the oem2orm tool WIP !!!!
-
 # oep-upload
 
 Experimental tool to handle the full use case of data uploads to the oeplatform:
