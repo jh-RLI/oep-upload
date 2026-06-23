@@ -69,6 +69,7 @@ def _phase(loggi, title: str) -> None:
 def cmd_run(
     strategy: str | None = None,
     log_file: str | None = None,
+    verify_after: bool = False,
 ) -> int:
     """Run the full upload pipeline. Returns a process exit code (0 = success)."""
     # Apply CLI overrides via the environment BEFORE settings are built or the
@@ -152,7 +153,34 @@ def cmd_run(
         return 1
 
     loggi.info("All steps completed successfully.")
+
+    if verify_after:
+        _phase(loggi, "Verify — local data vs OEP row counts")
+        from oep_upload.verify import verify_uploaded_data
+
+        report = verify_uploaded_data()
+        for line in report.format_table().splitlines():
+            loggi.info(line)
+        if not report.ok:
+            loggi.error("Verification found problems (see the table above).")
+            return 1
+
     return 0
+
+
+def cmd_verify() -> int:
+    """Compare the local datapackage data with the OEP row counts."""
+    settings = get_settings()
+    export_env_vars(settings)
+    setup_logging(level=settings.app.log_level, log_file=settings.app.log_file, force=True)
+
+    from oep_upload.verify import verify_uploaded_data
+
+    report = verify_uploaded_data()
+    print(report.format_table())
+    print()
+    print("Result:", "OK" if report.ok else "PROBLEMS FOUND")
+    return 0 if report.ok else 1
 
 
 def cmd_init(target_dir: str, force: bool) -> int:
@@ -217,6 +245,11 @@ def _add_run_options(p: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help="Also write logs to PATH (a directory makes one file per run).",
     )
+    p.add_argument(
+        "--verify",
+        action="store_true",
+        help="After uploading, verify local row counts against the OEP.",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -240,6 +273,10 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "config", help="Show the active configuration and where it loaded from."
     )
+    sub.add_parser(
+        "verify",
+        help="Compare local datapackage row counts with the OEP (no upload).",
+    )
     return parser
 
 
@@ -249,8 +286,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_init(args.dir, args.force)
     if args.command == "config":
         return cmd_config()
+    if args.command == "verify":
+        return cmd_verify()
     # default and "run"
-    return cmd_run(strategy=args.strategy, log_file=args.log_file)
+    return cmd_run(
+        strategy=args.strategy, log_file=args.log_file, verify_after=args.verify
+    )
 
 
 if __name__ == "__main__":
