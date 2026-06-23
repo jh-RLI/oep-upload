@@ -1,0 +1,209 @@
+"""Command-line entry point for oep-upload.
+
+Subcommands:
+  run     Run the full pipeline: describe -> create -> upload rows -> upload metadata (default).
+  init    Create starter settings.local.yaml and .env in a directory of your choice.
+  config  Show the active configuration and exactly which files it was loaded from.
+
+Available as the ``oep-upload`` console command, via ``python -m oep_upload``,
+and via the repo's ``main.py``. Config and ``.env`` are discovered from the
+current working directory, so it behaves the same however it was installed.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from oep_upload.config import export_env_vars, get_settings
+from oep_upload.config.loader import active_config_files
+from oep_upload.config.logging import setup_logging
+
+SETTINGS_LOCAL_TEMPLATE = """\
+# oep-upload — your machine-specific settings.
+# This file is read from the directory you run oep-upload in, and overrides the
+# packaged defaults. Keep it out of version control.
+#
+# Precedence: packaged defaults < this file < environment variables / .env
+
+api:
+  # Which OEP to talk to: "remote" (public openenergyplatform.org) or "local".
+  target: remote
+
+paths:
+  # Folder holding your datapackage (datapackage.json + data/*.csv).
+  # Relative paths are resolved from where you run oep-upload. ~ and $VARS work.
+  root: data/my_dataset
+  # Optional: subfolder with the CSVs, relative to root (defaults to root).
+  # data_dir: .
+  # Optional: the datapackage.json, relative to data_dir (or absolute).
+  datapackage_file: datapackage.json
+
+app:
+  log_level: INFO   # DEBUG | INFO | WARNING | ERROR | CRITICAL
+"""
+
+ENV_TEMPLATE = """\
+# oep-upload credentials & overrides. NEVER commit this file.
+
+# Your OEP API token (find it in your OEP profile settings).
+OEP_API_TOKEN=
+
+# Optional: which environment to load (prod = public OEP). Usually leave unset.
+# ENV=prod
+
+# Optional: point at your datapackage without editing YAML (relative to CWD or absolute).
+# OEP_OEM_FILE=data/my_dataset/datapackage.json
+"""
+
+
+def cmd_run() -> int:
+    """Run the full upload pipeline. Returns a process exit code (0 = success)."""
+    # Imported lazily: these modules build settings at import time, so keeping
+    # them here lets `init`/`config` work before the user has valid config.
+    from oep_upload.describe.csv_file import (
+        PackageSelectError,
+        process_single_datapackage,
+    )
+    from oep_upload.create.tables import create_tables_on_oedb
+    from oep_upload.upload.datapackage import upload_tabular_data
+    from oep_upload.upload.metadata.resource import (
+        upload_resource_metadata_for_package,
+    )
+
+    loggi = setup_logging()
+    settings = get_settings()
+    export_env_vars(settings)  # keep compatibility with code using env vars
+    loggi = setup_logging(level=settings.app.log_level, force=True)
+
+    loggi.info(
+        "Starting with target=%s, base_url=%s",
+        settings.api.target,
+        settings.endpoint.api_base_url,
+    )
+
+    package_hint = getattr(settings.paths, "data_dir", None)
+
+    # 1) Infer/refresh datapackage metadata (best effort; safe if it exists)
+    try:
+        loggi.info("Inferring metadata for datapackage (hint=%s)...", package_hint)
+        process_single_datapackage(
+            package_hint=package_hint, overwrite_legacy=False, stop_on_error=False
+        )
+    except PackageSelectError as e:
+        loggi.error("Could not resolve a datapackage to process: %s", e)
+    except Exception as e:  # noqa: BLE001 - keep going; an existing datapackage may work
+        loggi.exception("Unexpected error during metadata inference: %s", e)
+
+    # 2) Create tables on OEP
+    try:
+        path = settings.paths.resolved_data_dir
+        loggi.info("Creating tables on OEP from directory: %s", path)
+        create_tables_on_oedb(path)
+    except Exception as e:  # noqa: BLE001
+        loggi.exception("Table creation failed: %s", e)
+        return 1
+
+    # 3) Upload tabular data rows
+    try:
+        loggi.info("Uploading tabular data rows...")
+        upload_tabular_data()
+    except SystemExit as e:
+        loggi.error("Uploading rows aborted: %s", e)
+        return 1
+    except Exception as e:  # noqa: BLE001
+        loggi.exception("Uploading rows failed: %s", e)
+        return 1
+
+    # 4) Upload normalized per-resource metadata
+    try:
+        loggi.info("Uploading per-resource metadata (normalized)...")
+        upload_resource_metadata_for_package(package_hint=package_hint)
+    except Exception as e:  # noqa: BLE001
+        loggi.exception("Uploading resource metadata failed: %s", e)
+        return 1
+
+    loggi.info("All steps completed successfully.")
+    return 0
+
+
+def cmd_init(target_dir: str, force: bool) -> int:
+    """Scaffold settings.local.yaml and .env in `target_dir`."""
+    d = Path(target_dir).expanduser().resolve()
+    d.mkdir(parents=True, exist_ok=True)
+
+    for name, content in (
+        ("settings.local.yaml", SETTINGS_LOCAL_TEMPLATE),
+        (".env", ENV_TEMPLATE),
+    ):
+        p = d / name
+        if p.exists() and not force:
+            print(f"•  {p}  already exists — skipped (use --force to overwrite)")
+            continue
+        p.write_text(content, encoding="utf-8")
+        print(f"✓  wrote {p}")
+
+    print()
+    print("Next steps:")
+    print(f"  1. Add your OEP API token in   {d / '.env'}   (OEP_API_TOKEN=...)")
+    print(f"  2. Set your data location in   {d / 'settings.local.yaml'}   (paths.root)")
+    print(f"  3. From {d}, run:  oep-upload   (or 'oep-upload config' to verify)")
+    return 0
+
+
+def cmd_config() -> int:
+    """Show which config files are seen and the resulting active settings."""
+    print("Config files (✓ found · absent), lowest -> highest precedence:")
+    for f in active_config_files():
+        print(f"  {'✓' if f.is_file() else '·'}  {f}")
+    print()
+    try:
+        s = get_settings()
+        export_env_vars(s)
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠  Could not build settings: {e}")
+        return 1
+
+    print(f"Environment        : {s.env}")
+    print(f"Target             : {s.api.target}  ->  {s.endpoint.api_base_url}")
+    print(f"API token set      : {bool(s.effective_api_token)}")
+    print(f"Data root          : {s.paths.resolved_root}")
+    print(f"Data dir           : {s.paths.resolved_data_dir}")
+    print(f"Datapackage file   : {s.paths.resolved_datapackage_file}")
+    return 0
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="oep-upload",
+        description="Upload tabular data and metadata to the Open Energy Platform.",
+    )
+    sub = parser.add_subparsers(dest="command")
+    sub.add_parser("run", help="Run the full upload pipeline (default).")
+    p_init = sub.add_parser(
+        "init", help="Create starter settings.local.yaml and .env."
+    )
+    p_init.add_argument(
+        "--dir", default=".", help="Where to create the files (default: current dir)."
+    )
+    p_init.add_argument(
+        "--force", action="store_true", help="Overwrite existing files."
+    )
+    sub.add_parser(
+        "config", help="Show the active configuration and where it loaded from."
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_parser().parse_args(argv)
+    if args.command == "init":
+        return cmd_init(args.dir, args.force)
+    if args.command == "config":
+        return cmd_config()
+    return cmd_run()  # default and "run"
+
+
+if __name__ == "__main__":
+    sys.exit(main())
