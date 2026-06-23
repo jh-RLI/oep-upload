@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import argparse
 import sys
+import os
 from pathlib import Path
 
 from oep_upload.config import export_env_vars, get_settings
-from oep_upload.config.loader import active_config_files
+from oep_upload.config.loader import _build_settings, active_config_files
 from oep_upload.config.logging import setup_logging
 
 SETTINGS_LOCAL_TEMPLATE = """\
@@ -58,10 +59,43 @@ OEP_API_TOKEN=
 """
 
 
-def cmd_run() -> int:
+def _phase(loggi, title: str) -> None:
+    bar = "=" * 64
+    loggi.info(bar)
+    loggi.info("PHASE: %s", title)
+    loggi.info(bar)
+
+
+def cmd_run(
+    strategy: str | None = None,
+    log_file: str | None = None,
+) -> int:
     """Run the full upload pipeline. Returns a process exit code (0 = success)."""
-    # Imported lazily: these modules build settings at import time, so keeping
-    # them here lets `init`/`config` work before the user has valid config.
+    # Apply CLI overrides via the environment BEFORE settings are built or the
+    # heavy submodules are imported (they read settings at import time).
+    if strategy:
+        os.environ["UPLOAD__STRATEGY"] = strategy
+        _build_settings.cache_clear()
+
+    loggi = setup_logging()
+    settings = get_settings()
+    export_env_vars(settings)  # keep compatibility with code using env vars
+    loggi = setup_logging(
+        level=settings.app.log_level,
+        log_file=log_file or settings.app.log_file,
+        force=True,
+    )
+
+    loggi.info(
+        "Starting with target=%s, base_url=%s, strategy=%s",
+        settings.api.target,
+        settings.endpoint.api_base_url,
+        settings.upload.strategy,
+    )
+
+    # Imported lazily (after settings/env are in place): these modules build
+    # settings at import time, so this also lets `init`/`config` work before the
+    # user has valid config.
     from oep_upload.describe.csv_file import (
         PackageSelectError,
         process_single_datapackage,
@@ -72,20 +106,10 @@ def cmd_run() -> int:
         upload_resource_metadata_for_package,
     )
 
-    loggi = setup_logging()
-    settings = get_settings()
-    export_env_vars(settings)  # keep compatibility with code using env vars
-    loggi = setup_logging(level=settings.app.log_level, force=True)
-
-    loggi.info(
-        "Starting with target=%s, base_url=%s",
-        settings.api.target,
-        settings.endpoint.api_base_url,
-    )
-
     package_hint = getattr(settings.paths, "data_dir", None)
 
     # 1) Infer/refresh datapackage metadata (best effort; safe if it exists)
+    _phase(loggi, "1/4 Describe — infer datapackage metadata")
     try:
         loggi.info("Inferring metadata for datapackage (hint=%s)...", package_hint)
         process_single_datapackage(
@@ -97,6 +121,7 @@ def cmd_run() -> int:
         loggi.exception("Unexpected error during metadata inference: %s", e)
 
     # 2) Create tables on OEP
+    _phase(loggi, "2/4 Create — tables on the OEP")
     try:
         path = settings.paths.resolved_data_dir
         loggi.info("Creating tables on OEP from directory: %s", path)
@@ -106,6 +131,7 @@ def cmd_run() -> int:
         return 1
 
     # 3) Upload tabular data rows
+    _phase(loggi, "3/4 Upload — data rows (strategy=%s)" % settings.upload.strategy)
     try:
         loggi.info("Uploading tabular data rows...")
         upload_tabular_data()
@@ -117,6 +143,7 @@ def cmd_run() -> int:
         return 1
 
     # 4) Upload normalized per-resource metadata
+    _phase(loggi, "4/4 Upload — per-resource metadata")
     try:
         loggi.info("Uploading per-resource metadata (normalized)...")
         upload_resource_metadata_for_package(package_hint=package_hint)
@@ -171,7 +198,25 @@ def cmd_config() -> int:
     print(f"Data root          : {s.paths.resolved_root}")
     print(f"Data dir           : {s.paths.resolved_data_dir}")
     print(f"Datapackage file   : {s.paths.resolved_datapackage_file}")
+    print(f"Upload strategy    : {s.upload.strategy}")
+    print(f"Log level / file   : {s.app.log_level} / {s.app.log_file or '(console only)'}")
     return 0
+
+
+def _add_run_options(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--strategy",
+        choices=["append", "replace"],
+        default=None,
+        help="Upload strategy: append (default) or replace (clear table first).",
+    )
+    p.add_argument(
+        "--log-file",
+        dest="log_file",
+        default=None,
+        metavar="PATH",
+        help="Also write logs to PATH (a directory makes one file per run).",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -179,8 +224,10 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="oep-upload",
         description="Upload tabular data and metadata to the Open Energy Platform.",
     )
+    # Allow `oep-upload --strategy ... --log-file ...` with no subcommand (= run).
+    _add_run_options(parser)
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("run", help="Run the full upload pipeline (default).")
+    _add_run_options(sub.add_parser("run", help="Run the full upload pipeline (default)."))
     p_init = sub.add_parser(
         "init", help="Create starter settings.local.yaml and .env."
     )
@@ -202,7 +249,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_init(args.dir, args.force)
     if args.command == "config":
         return cmd_config()
-    return cmd_run()  # default and "run"
+    # default and "run"
+    return cmd_run(strategy=args.strategy, log_file=args.log_file)
 
 
 if __name__ == "__main__":
