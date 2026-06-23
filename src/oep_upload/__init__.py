@@ -66,6 +66,8 @@ def configure(
     datapackage_file: str | os.PathLike | None = None,
     api_token: str | None = None,
     log_level: str | None = None,
+    log_file: str | os.PathLike | None = None,
+    strategy: str | None = None,
 ):
     """Apply configuration overrides for programmatic use and return the Settings.
 
@@ -73,6 +75,10 @@ def configure(
     environment variables. They are written to the process environment, so call
     this once near the start of your program. Returns the resolved ``Settings``
     so you can inspect the active target, paths, etc.
+
+    ``strategy`` is the upload strategy (``"append"`` | ``"replace"``) and
+    ``log_file`` additionally writes logs to a file (or a directory for one file
+    per run).
     """
     overrides = {
         "OEP_CONFIG_DIR": config_dir,
@@ -85,6 +91,8 @@ def configure(
         "PATHS__DATAPACKAGE_FILE": datapackage_file,
         "OEP_API_TOKEN": api_token,
         "APP__LOG_LEVEL": log_level,
+        "APP__LOG_FILE": log_file,
+        "UPLOAD__STRATEGY": strategy,
     }
     for key, val in overrides.items():
         if val is not None:
