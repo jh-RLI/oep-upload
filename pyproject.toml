@@ -24,9 +24,17 @@ where = ["src"]
 [tool.setuptools.package-dir]
 "" = "src"
 
+# console entry point: `oep-upload` works regardless of how it was installed
+[project.scripts]
+oep-upload = "oep_upload.cli:main"
+
 # include YAML config files in the wheel
 [tool.setuptools.package-data]
 oep_upload = ["config/*.yaml"]
+
+# never ship a developer's machine-specific local config inside the wheel
+[tool.setuptools.exclude-package-data]
+oep_upload = ["config/settings.local.yaml"]
 
 [dependency-groups]
 dev = [
