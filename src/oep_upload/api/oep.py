@@ -54,6 +54,21 @@ class OEPApiClient:
         r.raise_for_status()
         return r.json()
 
+    def delete_json(
+        self,
+        *parts: str,
+        params: Dict[str, Any] | None = None,
+        timeout_override: Optional[int] = None,
+    ) -> Tuple[int, Dict[str, Any]]:
+        url = self.join(*parts)
+        t = timeout_override or max(120, self.timeout_s)
+        resp = self.session.delete(url, params=params, auth=self.auth, timeout=t)
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text}
+        return resp.status_code, data
+
     def post_json(
         self,
         *parts: str,
@@ -122,27 +137,33 @@ _api_client = OEPApiClient.from_settings()
 # ======================================================================
 class TablesService:
     """
-    Endpoints used:
-      GET  <base>/schema/{schema}/tables/{table}
-      GET  <base>/schema/{schema}/tables/{table}/meta
-      POST <base>/schema/{schema}/tables/{table}/rows/new {query: [...]}
+    Endpoints used (current OEP API — tables are addressed by name; the schema
+    is resolved server-side, so it is no longer part of the path):
+      GET    <base>/tables/{table}/
+      GET    <base>/tables/{table}/meta/
+      POST   <base>/tables/{table}/rows/new {query: [...]}
+      DELETE <base>/tables/{table}/rows/        (deletes all rows)
+
+    The legacy `schema/{schema}/tables/...` paths still work but are not used,
+    because POST/PUT/DELETE are not redirected from them.
+
+    `schema` is kept in the method signatures for the callers' bookkeeping
+    (FK ordering, identifiers) but is not part of the request URL.
     """
 
     def __init__(self, client: OEPApiClient | None = None):
         self.client = client or _api_client
 
     def get_table_info(self, schema: str, table: str) -> Dict[str, Any]:
-        return self.client.get_json("schema", schema, "tables", table)
+        return self.client.get_json("tables", table, "")
 
     def get_table_meta(self, schema: str, table: str) -> Dict[str, Any]:
-        return self.client.get_json("schema", schema, "tables", table, "meta")
+        return self.client.get_json("tables", table, "meta", "")
 
     def post_rows(
         self, schema: str, table: str, rows: List[Dict[str, Any]]
     ) -> Tuple[int, Dict[str, Any]]:
         status, payload = self.client.post_json(
-            "schema",
-            schema,
             "tables",
             table,
             "rows",
@@ -152,6 +173,14 @@ class TablesService:
             retry_for_5xx=True,
         )
         return status, payload
+
+    def delete_all_rows(self, schema: str, table: str) -> Tuple[int, Dict[str, Any]]:
+        """Delete every row from a table (keeps the table & schema).
+
+        DELETE <base>/tables/{table}/rows/  with no row_id and no where clause
+        deletes all rows (see oeplatform api.views.TableRowsAPIView.delete).
+        """
+        return self.client.delete_json("tables", table, "rows", "")
 
 
 # ======================================================================
