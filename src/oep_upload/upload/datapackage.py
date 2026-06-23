@@ -35,6 +35,7 @@ DRY_RUN: bool = bool(_s.upload.dry_run)
 MAX_RETRIES: int = int(_s.upload.max_retries)
 RETRY_BASE_DELAY: float = float(_s.upload.retry_base_delay)
 DEFAULT_SCHEMA: str = _s.upload.default_schema
+UPLOAD_STRATEGY: str = _s.upload.strategy  # "append" | "replace"
 
 # Null tokens
 NULL_TOKENS: set[str] = set(map(lambda s: s.lower(), _s.upload.null_tokens))
@@ -817,6 +818,22 @@ def upload_table(
     uploaded_rows = 0
     failed_rows = 0
     failed_batches = 0
+
+    # "replace" strategy: clear existing rows once before uploading, so the
+    # result is a fresh upload. Abort the table if clearing fails, rather than
+    # silently appending onto stale data.
+    if UPLOAD_STRATEGY == "replace":
+        if DRY_RUN:
+            print(f"DRY_RUN: would clear all rows of {schema}.{table} (replace)")
+        else:
+            loggi.info("Strategy 'replace': clearing existing rows of %s ...", table)
+            status, payload = _TABLES.delete_all_rows(schema, table)
+            if status not in (200, 201, 202, 204):
+                raise RuntimeError(
+                    f"Could not clear table '{table}' for a replace upload: "
+                    f"{status} {payload}"
+                )
+            loggi.info("Cleared existing rows of %s (status %s).", table, status)
 
     if len(tabulars) > 1:
         print(
