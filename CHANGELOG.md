@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`oep-upload` console command** (plus `python -m oep_upload`) with
+  subcommands: `run` (default), `init` (scaffold `settings.local.yaml` + `.env`
+  in the current directory), and `config` (print the resolved settings and
+  exactly which files were loaded — for diagnosing "my settings have no effect").
+- **Programmatic / library API** on the `oep_upload` package: `run()`,
+  `configure()`, `describe_datapackage()`, `create_tables()`, `upload_rows()`,
+  `upload_metadata()`. `configure()` lets integrators set target/paths/token in
+  code (overrides win over files); importing `oep_upload` stays lightweight.
+- **Project-local config discovery**: a `settings.local.yaml` in the current
+  working directory (or `./config/`) is now merged on top of the packaged
+  defaults, so settings take effect even when the package is `pip install`-ed
+  into site-packages.
 - **Layered, machine-local config**: a new gitignored `settings.local.yaml`
   layer for machine-specific overrides. Settings now merge with the precedence
   `settings.base.yaml < settings.<env>.yaml < settings.local.yaml < env vars / .env`.
@@ -43,6 +55,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`.env` `ENV` was read too late to select the environment**: `get_settings`
+  resolved the environment name (and `OEP_CONFIG_DIR`/`OEP_SETTINGS_FILE`) from
+  `os.environ` *before* loading the `.env`, so `ENV=dev` in a `.env` was ignored
+  and the loader fell back to `prod` (e.g. reporting `Environment: prod` while the
+  target was `local`). The `.env` is now loaded first, and `oep-upload config`
+  lists the env-specific file that is actually used.
+- **Installed-package settings were ignored / `.env` had no effect**: config was
+  only read from inside the installed package (site-packages), and
+  `export_env_vars` overwrote a user-set `OEP_OEM_FILE` (and tokens) with an
+  empty string. Now project-local `settings.local.yaml` is discovered from the
+  working directory, empty values never clobber existing env vars, and the
+  fully *resolved* datapackage path is exported.
+- **Developer's local config leaked into wheels**: `settings.local.yaml` is now
+  excluded from the built package (`exclude-package-data`), so one machine's
+  paths/target can't be shipped to others.
 - **`effective_api_token` dead branch**: removed the unreachable
   `api.target == "production"` check (`target` is only `remote`/`local`). For a
   `local` target it now prefers `OEP_API_TOKEN_LOCAL` and falls back to
@@ -74,8 +101,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tools/xls_to_csv.py` depends on `pandas` and `openpyxl`, which are not
   declared in project dependencies (install them manually, or they should be
   added as an optional dependency group).
-- `[tool.setuptools.package-data]` globs `config/*.yaml`, which can bundle a
-  developer's `settings.local.yaml` into a built wheel; consider excluding it.
 - `.pre-commit-config.yaml` defines three separate top-level `repos:` keys (only
   the last is used) and references `requirements.in`/`requirements.txt` that do
   not exist.
