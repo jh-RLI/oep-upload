@@ -44,3 +44,15 @@ def test_configure_overrides_win(tmp_path, monkeypatch):
     # path overrides flow through to the resolved datapackage path
     assert str(s.paths.resolved_datapackage_file).endswith("dp.json")
     assert str(s.paths.resolved_root) == str(tmp_path)
+
+
+def test_configure_strategy_and_log_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("ENV", raising=False)
+    log_path = tmp_path / "run.log"
+    s = oep_upload.configure(
+        api_token="tok",
+        strategy="replace",
+        log_file=str(log_path),
+    )
+    assert s.upload.strategy == "replace"
+    assert s.app.log_file == str(log_path)
