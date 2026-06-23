@@ -159,6 +159,29 @@ python main.py             # from a checkout
 Watch the logs. They tell you which target you're uploading to, which datapackage
 was selected, the upload order, and how many rows went to each table.
 
+### Options
+
+```bash
+# Write the full log to a file (a directory makes one timestamped file per run):
+oep-upload --log-file logs/
+
+# Fresh upload — clear each table's existing rows first (default is "append"):
+oep-upload --strategy replace
+```
+
+You can also set these in `settings.local.yaml`:
+
+```yaml
+app:
+  log_file: logs/         # file path appends; a directory = one file per run
+upload:
+  strategy: replace       # append (default) | replace
+```
+
+> [!warning]
+> `replace` deletes all existing rows of each uploaded table before inserting.
+> If clearing fails, the upload aborts rather than appending onto old data.
+
 ---
 
 ## Step 5: Read the logs and fix data issues

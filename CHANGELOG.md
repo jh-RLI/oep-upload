@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Log to a file**: `--log-file PATH` (or `app.log_file` / `OEP_LOG_FILE`) also
+  writes logs to a file — a file path appends, a directory creates one
+  timestamped file per run. Pipeline logs now include `PHASE:` banners so a
+  single log file is easy to navigate.
+- **Upload strategy**: `upload.strategy` = `append` (default) or `replace`.
+  `replace` clears the table's existing rows first for a fresh upload. Available
+  via `--strategy`, `settings.local.yaml`, and `oep_upload.configure(strategy=...)`.
 - **`oep-upload` console command** (plus `python -m oep_upload`) with
   subcommands: `run` (default), `init` (scaffold `settings.local.yaml` + `.env`
   in the current directory), and `config` (print the resolved settings and
@@ -40,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Migrated to the current OEP API paths**: table calls (insert, info, meta,
+  and the new delete-rows) now use the schemaless `tables/{table}/...` endpoints.
+  The legacy `schema/{schema}/tables/...` paths are not redirected for
+  POST/PUT/DELETE, so relying on them could silently drop writes.
 - `settings.base.yaml` is now generic and safe to commit — relative `root: data`,
   `target: remote`, and documented options. Personal/absolute paths belong in
   `settings.local.yaml`.
