@@ -39,8 +39,14 @@ git clone https://github.com/jh-RLI/oep-upload
 cd oep-upload
 uv venv --python 3.13
 source .venv/bin/activate
-uv pip install .
+uv pip install .          # or `uv pip install -e .` for development
 ```
+
+This installs the `oep-upload` command. Verify with `oep-upload --help`.
+
+> [!tip]
+> Config and `.env` are read from **the directory you run `oep-upload` in**, not
+> from inside the installed package — so you can run it from any project folder.
 
 ---
 
@@ -79,15 +85,21 @@ it to `datapackage.json` and refine it.
 
 There are two things to set: **your token** and **where your data is**.
 
-### 3a. Your API token
-
-Copy the example env file and add your token:
+The fastest way is to scaffold both files in your current folder:
 
 ```bash
-cp .env.example .env
+oep-upload init        # writes settings.local.yaml + .env here
 ```
 
-Then edit `.env`:
+Then edit the two files as described below, and verify with:
+
+```bash
+oep-upload config      # shows the resolved settings + which files were loaded
+```
+
+### 3a. Your API token
+
+`oep-upload init` created a `.env` (or copy `.env.example` to `.env`). Add your token:
 
 ```ini
 OEP_API_TOKEN=your-token-here
@@ -103,13 +115,14 @@ Settings are layered, lowest to highest precedence:
 settings.base.yaml  <  settings.<env>.yaml  <  settings.local.yaml  <  .env / env vars
 ```
 
-`settings.base.yaml` is shared and stays generic. **Put your own paths in
-`settings.local.yaml`** (create it next to the others under
-`src/oep_upload/config/`). It is gitignored, so your machine-specific paths are
-never committed:
+`settings.base.yaml` is shared and stays generic. **Put your own paths in a
+`settings.local.yaml` in the folder you run `oep-upload` from** (this is what
+`oep-upload init` creates). It is discovered from your working directory and
+overrides the packaged defaults — so it works whether you run from a checkout or
+an installed package:
 
 ```yaml
-# src/oep_upload/config/settings.local.yaml
+# ./settings.local.yaml  (in your project folder)
 api:
   target: remote        # the public OEP. Use "local" only for a local OEP instance.
 
@@ -119,9 +132,13 @@ paths:
   datapackage_file: datapackage.json
 ```
 
+> [!tip]
+> Run `oep-upload config` to confirm your `settings.local.yaml` is picked up
+> (look for a ✓ next to it) and to see the resolved target and paths.
+
 Path tips:
 
-- Relative paths are resolved from where you run the tool (usually the repo root).
+- Relative paths are resolved from where you run the tool (your working directory).
 - `~` and `$ENV_VARS` are expanded.
 - `data_dir` and `datapackage_file` are resolved **relative to `root`**; an
   absolute value simply overrides the parent. In the simple case you only need
@@ -131,8 +148,12 @@ Path tips:
 
 ## Step 4: Run it
 
+Any of these run the full pipeline (they're equivalent):
+
 ```bash
-python main.py
+oep-upload                # the installed command (recommended)
+python -m oep_upload       # module form
+python main.py             # from a checkout
 ```
 
 Watch the logs. They tell you which target you're uploading to, which datapackage
@@ -152,7 +173,7 @@ Most failures come down to:
 - **Missing token / permissions** — re-check `.env` and that `api.target` matches
   the OEP instance your token is for.
 
-Fix, re-run `python main.py`, repeat until it succeeds. Re-runs are safe.
+Fix, re-run `oep-upload`, repeat until it succeeds. Re-runs are safe.
 
 ---
 
@@ -164,7 +185,9 @@ Set `OEP_API_TOKEN` in `.env`. If `api.target: local`, set `OEP_API_TOKEN_LOCAL`
 
 **"No datapackage found" / "Could not resolve a datapackage"**
 Set `paths.root` (and `datapackage_file` if needed) in `settings.local.yaml`, and
-make sure the path exists.
+make sure the path exists. Run `oep-upload config` to confirm your file is loaded
+(✓) and see the resolved paths. You can also point at the file directly via
+`OEP_OEM_FILE=path/to/datapackage.json` in `.env`.
 
 **"No local tabular paths found for &lt;table&gt;"**
 Each resource in your `datapackage.json` needs a relative `path` to its CSV file,
@@ -179,6 +202,44 @@ non-fatal: if a valid `datapackage.json` already exists, the upload continues.
 
 **Want more detail in the logs?**
 Set `app.log_level: DEBUG` in `settings.local.yaml`, or `LOG_LEVEL=DEBUG` in `.env`.
+
+---
+
+## Use it from Python (library)
+
+You can drive the same pipeline from your own code instead of the CLI.
+
+```python
+import oep_upload
+
+# (a) rely on .env / settings.local.yaml discovered in the working directory:
+oep_upload.run()
+
+# (b) or configure everything in code — no config files needed:
+oep_upload.run(
+    data_root="/data/my_dataset",
+    datapackage_file="datapackage.json",
+    target="remote",
+    api_token="...",
+)
+
+# individual steps are available too:
+oep_upload.describe_datapackage()
+oep_upload.create_tables()
+oep_upload.upload_rows()
+oep_upload.upload_metadata(extra_keywords=["my_project"])
+
+# inspect the resolved configuration without running anything:
+settings = oep_upload.configure(target="remote")
+print(settings.api.target, settings.paths.resolved_datapackage_file)
+```
+
+> [!important]
+> `run()` / `configure()` / the step helpers set up configuration before
+> importing the heavy submodules (which read settings at import time). Call one
+> of them — or set your environment — **before** importing
+> `oep_upload.upload`/`create`/`describe` directly, and configure once per process.
+> Values passed to `configure()`/`run()` override `.env` and the YAML files.
 
 ---
 
