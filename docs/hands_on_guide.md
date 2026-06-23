@@ -23,24 +23,26 @@ Practically we want you to use a datapackage directory structure which is setup 
 
 The upload of data to the OEP using the API requires some settings, most of them are handled by the tool already and must only be changed if you are a developer who wants to use a test OEP setup. There are some settings which are relevant for you as a user to adapt to you specific use:
 
-- Find the file ".env.example" in the root of the tool directory, copy it and rename it to .env
-- Add yor OEP-API token there under "OEP_API_TOKEN"
-- Tell the tool where your data lives. Settings are layered with this precedence
-  (lowest to highest): `settings.base.yaml` < `settings.<env>.yaml` <
-  `settings.local.yaml` < environment variables / `.env`. The shared
-  `settings.base.yaml` should stay generic — put **your machine-specific paths**
-  in `settings.local.yaml` (next to it under `src/oep_upload/config/`), which is
-  gitignored and never committed.
+- The easiest way is to scaffold the two config files in your project folder:
 
-  Create `src/oep_upload/config/settings.local.yaml` with your paths:
+  ```bash
+  oep-upload init      # writes settings.local.yaml + .env into the current folder
+  ```
+
+- Add your OEP-API token in the created `.env` under `OEP_API_TOKEN`.
+- Tell the tool where your data lives by editing `settings.local.yaml`. Settings
+  are layered (lowest to highest): `settings.base.yaml` < `settings.<env>.yaml` <
+  packaged `settings.local.yaml` < **project `settings.local.yaml` (your working
+  directory)** < environment variables / `.env`.
 
   ```yaml
+  # ./settings.local.yaml  (in the folder you run oep-upload from)
   api:
     target: remote   # or "local" if you run a local OEP
 
   paths:
     # Folder that holds your datapackage. Relative paths are resolved from where
-    # you run the tool (usually the repo root). `~` and $ENV_VARS are expanded.
+    # you run the tool. `~` and $ENV_VARS are expanded.
     root: data/my_dataset
     # Optional: where the data files are, relative to root (defaults to root).
     # data_dir: .
@@ -49,8 +51,13 @@ The upload of data to the OEP using the API requires some settings, most of them
   ```
 
   You only need `root` in the simple case. `data_dir` and `datapackage_file` are
-  resolved relative to `root`; giving an absolute value simply overrides the
-  parent. No more fighting with leading/trailing slashes.
+  resolved relative to `root`; an absolute value simply overrides the parent.
+
+- Verify the tool picked everything up:
+
+  ```bash
+  oep-upload config    # shows the resolved settings and which files were loaded
+  ```
 
 ## 3 Run the tool
 
@@ -67,8 +74,10 @@ Currently you have to install the oep-upload tool, please use the python package
   - source venv/bin/activate
   - uv pip install .
 
-- Run the tool by running its main.py module
+- Run the tool (any of these are equivalent):
 
+  - oep-upload
+  - python -m oep_upload
   - python main.py
 
 ## 4 Fix errors in the config, data and metadata & Repeat running the tool

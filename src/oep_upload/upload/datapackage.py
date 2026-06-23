@@ -35,6 +35,7 @@ DRY_RUN: bool = bool(_s.upload.dry_run)
 MAX_RETRIES: int = int(_s.upload.max_retries)
 RETRY_BASE_DELAY: float = float(_s.upload.retry_base_delay)
 DEFAULT_SCHEMA: str = _s.upload.default_schema
+UPLOAD_STRATEGY: str = _s.upload.strategy  # "append" | "replace"
 
 # Null tokens
 NULL_TOKENS: set[str] = set(map(lambda s: s.lower(), _s.upload.null_tokens))
@@ -501,7 +502,9 @@ def _get_tabular_resources(
     return tabulars
 
 
-def _get_table_columns(schema: str, table: str) -> tuple[list[str], set[str], bool]:
+def _get_table_columns(
+    schema: str, table: str
+) -> tuple[list[str], set[str], bool, dict[str, dict]]:
     info = _TABLES.get_table_info(schema, table)
     columns: dict[str, dict] = info["columns"]
     column_names = list(columns.keys())
@@ -518,7 +521,7 @@ def _get_table_columns(schema: str, table: str) -> tuple[list[str], set[str], bo
             serial_pk = True
             required_nonnull.discard("id")
 
-    return column_names, required_nonnull, serial_pk
+    return column_names, required_nonnull, serial_pk, columns
 
 
 def _infer_shape(column_names: list[str]) -> TableShape:
@@ -733,15 +736,70 @@ def _map_wide_rows(
     return batch
 
 
-def _post_rows(schema: str, table: str, rows: list[dict[str, Any]]) -> None:
+_TEXTISH_PG_TYPES = ("char", "text", "string", "json", "uuid", "bytea", "name", "enum")
+
+
+def _pg_type_of(coldef: dict | None) -> str:
+    if not coldef:
+        return ""
+    t = coldef.get("udt_name") or coldef.get("data_type") or coldef.get("type") or ""
+    return str(t).strip().lower()
+
+
+def _is_textish_type(pg_type: str) -> bool:
+    return (not pg_type) or any(t in pg_type for t in _TEXTISH_PG_TYPES)
+
+
+def _looks_like_header_row(row: dict[str, Any], coldefs: dict[str, dict]) -> bool:
+    """Type-aware check: does this mapped row look like a leaked CSV header?
+
+    A header row places column *names* into every column. The tell-tale sign
+    that survives the other heuristics is a **non-text** column (timestamp,
+    numeric, boolean, ...) holding a string equal to a column name — real data
+    never does that. Designed for near-zero false positives.
+    """
+    col_name_set = {c.lower() for c in coldefs}
+    for col, val in row.items():
+        if not isinstance(val, str):
+            continue
+        s = val.strip()
+        if not s:
+            continue
+        if _is_textish_type(_pg_type_of(coldefs.get(col))):
+            continue
+        # A typed (non-text) column holding text that names a column → header.
+        if s.lower() in col_name_set or s.lower() == col.lower():
+            return True
+    return False
+
+
+def _post_rows(schema: str, table: str, rows: list[dict[str, Any]]) -> bool:
+    """POST a batch. Returns True on success, False on a rejected batch."""
     if DRY_RUN:
         print(f"DRY_RUN: would POST {len(rows)} rows")
-        return
+        return True
 
     status, payload = _TABLES.post_rows(schema, table, rows)
-    if status not in (200, 201, 202):
-        loggi.warning(RuntimeError(f"POST failed: {status} {payload}"))
-    print(f"Uploaded {len(rows)} rows -> status {status}")
+    if status in (200, 201, 202):
+        print(f"Uploaded {len(rows)} rows -> status {status}")
+        return True
+
+    # Surface a sample of the offending row so the cause (e.g. a leaked header
+    # row, a type mismatch) is visible. The OEP rejects the whole batch on one
+    # bad row, so these rows were NOT uploaded.
+    sample = rows[0] if rows else {}
+    snippet = {k: sample.get(k) for k in list(sample.keys())[:8]}
+    loggi.error(
+        "POST FAILED for %s.%s: status %s — %d rows in this batch were NOT uploaded.\n"
+        "  reason: %s\n  first row of batch: %s",
+        schema,
+        table,
+        status,
+        len(rows),
+        payload,
+        json.dumps(snippet, ensure_ascii=False, default=str)[:400],
+    )
+    return False
 
 
 # =========================
@@ -751,11 +809,31 @@ def upload_table(
     schema: str, table: str, resources_override: list[Resource] | None = None
 ) -> None:
     tabulars = _get_tabular_resources(schema, table, resources_override)
-    column_names, required_nonnull, serial_pk = _get_table_columns(schema, table)
+    column_names, required_nonnull, serial_pk, coldefs = _get_table_columns(
+        schema, table
+    )
     shape = _infer_shape(column_names)
     db_cols_set = set(column_names)
 
-    total_rows = 0
+    uploaded_rows = 0
+    failed_rows = 0
+    failed_batches = 0
+
+    # "replace" strategy: clear existing rows once before uploading, so the
+    # result is a fresh upload. Abort the table if clearing fails, rather than
+    # silently appending onto stale data.
+    if UPLOAD_STRATEGY == "replace":
+        if DRY_RUN:
+            print(f"DRY_RUN: would clear all rows of {schema}.{table} (replace)")
+        else:
+            loggi.info("Strategy 'replace': clearing existing rows of %s ...", table)
+            status, payload = _TABLES.delete_all_rows(schema, table)
+            if status not in (200, 201, 202, 204):
+                raise RuntimeError(
+                    f"Could not clear table '{table}' for a replace upload: "
+                    f"{status} {payload}"
+                )
+            loggi.info("Cleared existing rows of %s (status %s).", table, status)
 
     if len(tabulars) > 1:
         print(
@@ -778,6 +856,7 @@ def upload_table(
 
         keymap: dict[str, str] | None = None
         header_ctx = HeaderContext()
+        wide_header_checked = False
 
         for raw_batch in stream_csv_batches(
             csv_path,
@@ -820,8 +899,11 @@ def upload_table(
                 )
                 if not out_rows:
                     continue
-                _post_rows(schema, table, out_rows)
-                total_rows += len(out_rows)
+                if _post_rows(schema, table, out_rows):
+                    uploaded_rows += len(out_rows)
+                else:
+                    failed_rows += len(out_rows)
+                    failed_batches += 1
                 continue
 
             # WIDE
@@ -831,10 +913,39 @@ def upload_table(
             )
             if not batch:
                 continue
-            _post_rows(schema, table, batch)
-            total_rows += len(batch)
 
-    print(f"Done: {table} uploaded {total_rows} rows total.")
+            # Safety net: if the upstream header heuristics missed a leading
+            # header row, drop it here (type-aware) before it poisons the whole
+            # batch — the OEP rejects the entire batch on a single bad row.
+            if not wide_header_checked:
+                wide_header_checked = True
+                if _looks_like_header_row(batch[0], coldefs):
+                    loggi.warning(
+                        "Dropping a leading header-like row in %s "
+                        "(a column name appeared in a non-text column).",
+                        csv_path.name,
+                    )
+                    batch = batch[1:]
+                    if not batch:
+                        continue
+
+            if _post_rows(schema, table, batch):
+                uploaded_rows += len(batch)
+            else:
+                failed_rows += len(batch)
+                failed_batches += 1
+
+    if failed_batches:
+        loggi.error(
+            "Done: %s — %d rows uploaded, but %d batch(es) (%d rows) FAILED and "
+            "were NOT uploaded. See the 'POST FAILED' messages above.",
+            table,
+            uploaded_rows,
+            failed_batches,
+            failed_rows,
+        )
+    else:
+        print(f"Done: {table} uploaded {uploaded_rows} rows total.")
 
 
 # =========================

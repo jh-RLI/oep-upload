@@ -41,6 +41,9 @@ class AppSettings(BaseModel):
     name: str = "oep-uploader"
     timezone: str = "Europe/Berlin"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    # Optional path to also write logs to. A file path appends; a directory
+    # (or a trailing slash) creates one timestamped file per run.
+    log_file: Optional[str] = None
 
 
 class PathsSettings(BaseModel):
@@ -102,6 +105,9 @@ class UploadSettings(BaseModel):
     max_retries: int = 5
     retry_base_delay: float = 1.5
     null_tokens: List[str] = ["", "null", "none", "na", "nan", "n/a"]
+    # "append": add rows to whatever is already in the table (default).
+    # "replace": clear the table's existing rows first, for a fresh upload.
+    strategy: Literal["append", "replace"] = "append"
 
 
 class Settings(BaseSettings):

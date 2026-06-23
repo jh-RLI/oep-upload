@@ -10,6 +10,33 @@ Experimental tool to handle the full use case of data uploads to the oeplatform:
 - `oep_upload.cofig` Module to load settings, setup you application to your needs, use environments which change the target of the API requests from localhost to openenergyplatform.org and more.
 - `.env` File to set your credentials and security info
 
+## Quickstart
+
+```bash
+uv pip install .                 # installs the `oep-upload` command
+
+oep-upload init                  # scaffold settings.local.yaml + .env here
+# 1) put your token in .env (OEP_API_TOKEN=...)
+# 2) set paths.root in settings.local.yaml
+oep-upload config                # verify which config was loaded
+oep-upload                       # run the full pipeline
+```
+
+Or drive it from Python:
+
+```python
+import oep_upload
+
+oep_upload.run(
+    data_root="/data/my_dataset",
+    datapackage_file="datapackage.json",
+    target="remote",
+    api_token="...",
+)
+```
+
+See [docs/usage.md](docs/usage.md) for the full step-by-step guide.
+
 ## Use case
 
 ### Setup tool & Create tables
