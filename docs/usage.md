@@ -7,6 +7,11 @@ A step-by-step guide to publish your tabular data and metadata to the
 > `datapackage.json`, run it once, and it creates the tables on the OEP, uploads
 > the rows, and uploads the metadata.
 
+> [!tip] Uploading to a local Docker OEP?
+> See the focused walkthrough in
+> [local-oep-quickstart.md](local-oep-quickstart.md) — from-scratch setup plus
+> fresh-vs-continue uploads and a verification step (CLI and a Python script).
+
 ---
 
 ## What the tool does
@@ -167,6 +172,9 @@ oep-upload --log-file logs/
 
 # Fresh upload — clear each table's existing rows first (default is "append"):
 oep-upload --strategy replace
+
+# Verify row counts against your local data after uploading:
+oep-upload --strategy replace --verify
 ```
 
 You can also set these in `settings.local.yaml`:
@@ -251,6 +259,11 @@ oep_upload.describe_datapackage()
 oep_upload.create_tables()
 oep_upload.upload_rows()
 oep_upload.upload_metadata(extra_keywords=["my_project"])
+
+# verify the upload (row counts) — great as a pipeline gate:
+report = oep_upload.verify()
+if not report.ok:
+    raise SystemExit(report.format_table())
 
 # inspect the resolved configuration without running anything:
 settings = oep_upload.configure(target="remote")
