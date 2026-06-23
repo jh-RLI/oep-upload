@@ -55,6 +55,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Leaked CSV header row poisoning the first upload batch**: when the header
+  heuristics missed a file's header, the header row was sent as data and the OEP
+  rejected the *entire* first batch (e.g. `invalid input syntax for type
+  timestamp: "t"` — the column name `t` landing in the timestamp column). Added a
+  type-aware safety net that drops a leading row when a column name appears in a
+  non-text column (near-zero false positives), and made failures impossible to
+  miss: a rejected batch now logs `POST FAILED` with a sample row and is reported
+  as failed (not "Uploaded"), with a per-table summary of failed/uploaded rows.
 - **`.env` `ENV` was read too late to select the environment**: `get_settings`
   resolved the environment name (and `OEP_CONFIG_DIR`/`OEP_SETTINGS_FILE`) from
   `os.environ` *before* loading the `.env`, so `ENV=dev` in a `.env` was ignored
