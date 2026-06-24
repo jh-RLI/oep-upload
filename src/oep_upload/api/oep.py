@@ -182,6 +182,20 @@ class TablesService:
         """
         return self.client.delete_json("tables", table, "rows", "")
 
+    def get_row_count(
+        self, schema: str, table: str, *, precise_below: int = 10**9
+    ) -> int:
+        """Return the number of rows in a table.
+
+        Uses GET <base>/tables/{table}/rowcount; `precise-below` forces an exact
+        count for tables smaller than the given threshold (vs. a fast estimate).
+        Response shape: {"data": [[<count>]]}.
+        """
+        payload = self.client.get_json(
+            "tables", table, "rowcount", params={"precise-below": precise_below}
+        )
+        return int(payload["data"][0][0])
+
 
 # ======================================================================
 # Datasets service

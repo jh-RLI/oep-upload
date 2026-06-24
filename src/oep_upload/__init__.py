@@ -49,6 +49,7 @@ __all__ = [
     "create_tables",
     "upload_rows",
     "upload_metadata",
+    "verify",
     "get_settings",
     "export_env_vars",
 ]
@@ -160,3 +161,18 @@ def upload_metadata(
     return upload_resource_metadata_for_package(
         package_hint=package_hint, extra_keywords=extra_keywords
     )
+
+
+def verify(**overrides: Any):
+    """Verify the upload: compare local CSV row counts with the OEP table counts.
+
+    Returns a ``VerificationReport`` (``.ok`` is True when nothing is wrong,
+    ``.format_table()`` renders a summary). Accepts the same keyword overrides as
+    :func:`configure`, so it works standalone or as a pipeline step after
+    :func:`run`.
+    """
+    if overrides:
+        configure(**overrides)
+    from oep_upload.verify import verify_uploaded_data
+
+    return verify_uploaded_data()

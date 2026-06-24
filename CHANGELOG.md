@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Upload verification**: a built-in `verify` feature that compares each table's
+  row count on the OEP with the count expected from the local CSVs (pivot-aware:
+  wide `from`/`to`/`type` files expand to one row per timestamp × series).
+  Available as `oep-upload verify`, `oep-upload run --verify`, and
+  `oep_upload.verify(...)` (returns a `VerificationReport` with `.ok` /
+  `.format_table()`). Exits non-zero on real problems so it works as a pipeline
+  gate. Uses the OEP `tables/{table}/rowcount` endpoint.
 - **Log to a file**: `--log-file PATH` (or `app.log_file` / `OEP_LOG_FILE`) also
   writes logs to a file — a file path appends, a directory creates one
   timestamped file per run. Pipeline logs now include `PHASE:` banners so a
