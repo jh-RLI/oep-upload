@@ -183,6 +183,38 @@ def cmd_verify() -> int:
     return 0 if report.ok else 1
 
 
+def cmd_retry(strategy: str = "replace", log_file: str | None = None) -> int:
+    """Re-upload only the tables that failed in the last run."""
+    settings = get_settings()
+    export_env_vars(settings)
+    setup_logging(
+        level=settings.app.log_level,
+        log_file=log_file or settings.app.log_file,
+        force=True,
+    )
+
+    from oep_upload.upload.datapackage import retry_failed_uploads
+
+    results = retry_failed_uploads(strategy=strategy)
+    if not results:
+        print("Nothing to retry.")
+        return 0
+
+    still_failing = [r for r in results if not r.ok]
+    for r in results:
+        state = "OK" if r.ok else "FAILED"
+        print(
+            f"  {r.table}: uploaded={r.uploaded_rows} failed_rows={r.failed_rows}"
+            f"  -> {state}"
+        )
+    print()
+    if still_failing:
+        print(f"Result: {len(still_failing)} table(s) still failing.")
+        return 1
+    print("Result: all retried tables uploaded.")
+    return 0
+
+
 def cmd_init(target_dir: str, force: bool) -> int:
     """Scaffold settings.local.yaml and .env in `target_dir`."""
     d = Path(target_dir).expanduser().resolve()
@@ -277,6 +309,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "verify",
         help="Compare local datapackage row counts with the OEP (no upload).",
     )
+    p_retry = sub.add_parser(
+        "retry",
+        help="Re-upload only the tables that failed in the last run.",
+    )
+    p_retry.add_argument(
+        "--strategy",
+        choices=["append", "replace"],
+        default="replace",
+        help="How to re-upload failed tables (default: replace = clear first).",
+    )
+    p_retry.add_argument(
+        "--log-file",
+        dest="log_file",
+        default=None,
+        metavar="PATH",
+        help="Also write logs to PATH (a directory makes one file per run).",
+    )
     return parser
 
 
@@ -288,6 +337,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_config()
     if args.command == "verify":
         return cmd_verify()
+    if args.command == "retry":
+        return cmd_retry(strategy=args.strategy, log_file=args.log_file)
     # default and "run"
     return cmd_run(
         strategy=args.strategy, log_file=args.log_file, verify_after=args.verify
