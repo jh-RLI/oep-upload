@@ -36,6 +36,21 @@ def test_concurrent_posting_aggregates(monkeypatch):
     assert sorted(seen) == [1, 2, 3, 4]  # every batch was attempted exactly once
 
 
+def test_id_missing_message():
+    cols = ["id", "t", "value"]
+    # serial id + no id in the mapped row -> warn
+    assert dp._id_missing_message("t1", True, cols, {"t": "x", "value": 1}) is not None
+    assert "NOT preserved" in dp._id_missing_message("t1", True, cols, {"t": "x"})
+    # id present in the data -> no warning
+    assert dp._id_missing_message("t1", True, cols, {"id": 5, "t": "x"}) is None
+    # not a serial pk -> no warning
+    assert dp._id_missing_message("t1", False, cols, {"t": "x"}) is None
+    # table has no id column -> no warning
+    assert dp._id_missing_message("t1", True, ["t", "value"], {"t": "x"}) is None
+    # nothing to sample -> no warning
+    assert dp._id_missing_message("t1", True, cols, None) is None
+
+
 def test_concurrent_matches_sequential_totals(monkeypatch):
     # same inputs -> same aggregate regardless of path
     monkeypatch.setattr(dp, "_post_rows", lambda s, t, rows: (len(rows) != 0, ""))
