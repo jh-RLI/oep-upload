@@ -74,7 +74,10 @@ Rules that make the upload succeed:
 - **Names** — letters, digits and `_` only; keep table and column names under
   50 characters (longer names are auto-truncated).
 - **Primary key** — only a column literally named `id` can be the primary key.
-  If you don't have one, the OEP adds it automatically.
+  If you don't have one, the OEP adds it automatically. **IDs are only preserved if
+  your CSV actually contains an `id` column with values;** otherwise the OEP assigns
+  new ones (and their order is non-deterministic with `concurrency > 1`). The upload
+  logs a **warning** when a table auto-generates `id` but your data provides none.
 - **Foreign keys** must reference a column in a table that also exists in your
   datapackage.
 - **No `"any"` data types** — that means a column holds mixed types and the upload

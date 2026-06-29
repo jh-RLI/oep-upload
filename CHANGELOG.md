@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Warn when local ids won't be preserved**: if a table has an auto-generated
+  `id` (serial primary key) but the data provides no `id` values, the upload now
+  logs a warning (the OEP will assign new ids; order is non-deterministic with
+  concurrency > 1). IDs are preserved only when the CSV carries an `id` column.
 - **Faster uploads (opt-in concurrency) + throughput logging**: a new
   `upload.concurrency` setting (default `1` = unchanged) uploads N batches in
   parallel per table via a thread pool, overlapping the per-batch network/server
