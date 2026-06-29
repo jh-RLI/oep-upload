@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Faster uploads (opt-in concurrency) + throughput logging**: a new
+  `upload.concurrency` setting (default `1` = unchanged) uploads N batches in
+  parallel per table via a thread pool, overlapping the per-batch network/server
+  wait. The connection pool is sized to match. The upload now logs per-batch and
+  per-table **rows/s**, so the bottleneck is measurable. Batch preparation
+  (mapping) was refactored into a producer so posting can run sequentially or
+  concurrently without changing the mapping logic. See the performance analysis
+  note for why uploads are slow (mostly the OEP's change-tracked insert path).
 - **Retry only the failed uploads**: a partial upload now records the tables that
   failed to a journal (`upload.failure_log`, default `.oep-upload/last-run.json`),
   and `oep-upload retry` (or `oep_upload.retry()`) re-uploads **only those tables**
