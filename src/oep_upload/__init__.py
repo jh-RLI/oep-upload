@@ -50,6 +50,7 @@ __all__ = [
     "upload_rows",
     "upload_metadata",
     "verify",
+    "retry",
     "get_settings",
     "export_env_vars",
 ]
@@ -176,3 +177,17 @@ def verify(**overrides: Any):
     from oep_upload.verify import verify_uploaded_data
 
     return verify_uploaded_data()
+
+
+def retry(*, strategy: str = "replace", **overrides: Any):
+    """Re-upload only the tables that failed in the last run.
+
+    Reads the failure journal written by the previous upload and re-uploads
+    just those tables (default strategy ``replace``). Accepts the same keyword
+    overrides as :func:`configure`. Returns the list of per-table results.
+    """
+    if overrides:
+        configure(**overrides)
+    from oep_upload.upload.datapackage import retry_failed_uploads
+
+    return retry_failed_uploads(strategy=strategy)
