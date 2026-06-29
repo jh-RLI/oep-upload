@@ -175,6 +175,9 @@ oep-upload --strategy replace
 
 # Verify row counts against your local data after uploading:
 oep-upload --strategy replace --verify
+
+# Re-upload only the tables that failed last run (after fixing the data):
+oep-upload retry
 ```
 
 You can also set these in `settings.local.yaml`:
@@ -264,6 +267,9 @@ oep_upload.upload_metadata(extra_keywords=["my_project"])
 report = oep_upload.verify()
 if not report.ok:
     raise SystemExit(report.format_table())
+
+# after fixing the data, re-upload ONLY the tables that failed last run:
+oep_upload.retry()   # defaults to the replace strategy
 
 # inspect the resolved configuration without running anything:
 settings = oep_upload.configure(target="remote")
