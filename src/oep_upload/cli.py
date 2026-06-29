@@ -259,6 +259,7 @@ def cmd_config() -> int:
     print(f"Data dir           : {s.paths.resolved_data_dir}")
     print(f"Datapackage file   : {s.paths.resolved_datapackage_file}")
     print(f"Upload strategy    : {s.upload.strategy}")
+    print(f"Batch / concurrency: {s.upload.batch_size} rows × {s.upload.concurrency} parallel")
     print(f"Log level / file   : {s.app.log_level} / {s.app.log_file or '(console only)'}")
     return 0
 
