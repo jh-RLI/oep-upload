@@ -836,6 +836,34 @@ def _post_rows(schema: str, table: str, rows: list[dict[str, Any]]) -> tuple[boo
 # =========================
 # BATCH PRODUCER + POSTERS
 # =========================
+def _id_missing_message(
+    table: str,
+    serial_pk: bool,
+    column_names: list[str],
+    sample_row: dict[str, Any] | None,
+) -> str | None:
+    """Warning text if the table auto-generates `id` but the data has none.
+
+    `convert_row_passthrough` drops a missing/empty `id` for a serial primary
+    key, so an absent `id` in a mapped row means the OEP will assign a new one.
+    Returns None when there is nothing to warn about.
+    """
+    if not (serial_pk and "id" in column_names):
+        return None
+    if not sample_row or "id" in sample_row:
+        return None
+    extra = (
+        " (and their order is non-deterministic with concurrency > 1)"
+        if UPLOAD_CONCURRENCY > 1
+        else ""
+    )
+    return (
+        f"{table}: the data provides no 'id' values but the table has an "
+        f"auto-generated 'id' (serial primary key) — the OEP will assign NEW ids, "
+        f"so your local ids are NOT preserved{extra}."
+    )
+
+
 def _iter_ready_batches(
     table: str,
     tabulars: list[Resource],
@@ -852,6 +880,17 @@ def _iter_ready_batches(
     This is the CPU/producer side; posting happens in the caller so it can run
     sequentially or in parallel without changing this logic.
     """
+    id_warned = False
+
+    def _warn_id(rows: list[dict[str, Any]]) -> None:
+        nonlocal id_warned
+        if id_warned:
+            return
+        msg = _id_missing_message(table, serial_pk, column_names, rows[0] if rows else None)
+        if msg:
+            loggi.warning(msg)
+        id_warned = True
+
     for res in tabulars:
         csv_path = resolve_csv_path(res.path)
         csv_fields = res.csv_fields or []
@@ -910,6 +949,7 @@ def _iter_ready_batches(
                     raw_batch, header_ctx, shape, db_cols_set=db_cols_set
                 )
                 if out_rows:
+                    _warn_id(out_rows)
                     yield out_rows
                 continue
 
@@ -935,6 +975,7 @@ def _iter_ready_batches(
                     batch = batch[1:]
 
             if batch:
+                _warn_id(batch)
                 yield batch
 
 
