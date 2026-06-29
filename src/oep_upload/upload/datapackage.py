@@ -8,7 +8,8 @@ import gzip
 import bz2
 import lzma
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -36,6 +37,7 @@ MAX_RETRIES: int = int(_s.upload.max_retries)
 RETRY_BASE_DELAY: float = float(_s.upload.retry_base_delay)
 DEFAULT_SCHEMA: str = _s.upload.default_schema
 UPLOAD_STRATEGY: str = _s.upload.strategy  # "append" | "replace"
+FAILURE_LOG: str = _s.upload.failure_log  # where failed tables are recorded
 
 # Null tokens
 NULL_TOKENS: set[str] = set(map(lambda s: s.lower(), _s.upload.null_tokens))
@@ -66,6 +68,23 @@ class Resource:
     encoding: str | None = None
     csv_fields: list[str] | None = None
     db_columns: list[str] | None = None
+
+
+@dataclass
+class TableUploadResult:
+    """Outcome of uploading a single table — used for the retry journal."""
+
+    schema: str
+    table: str
+    uploaded_rows: int = 0
+    failed_rows: int = 0
+    failed_batches: int = 0
+    first_error: str = ""
+    csv_paths: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.failed_batches == 0 and not self.first_error
 
 
 # =========================
@@ -773,16 +792,16 @@ def _looks_like_header_row(row: dict[str, Any], coldefs: dict[str, dict]) -> boo
     return False
 
 
-def _post_rows(schema: str, table: str, rows: list[dict[str, Any]]) -> bool:
-    """POST a batch. Returns True on success, False on a rejected batch."""
+def _post_rows(schema: str, table: str, rows: list[dict[str, Any]]) -> tuple[bool, str]:
+    """POST a batch. Returns (ok, detail); detail is a short error on failure."""
     if DRY_RUN:
         print(f"DRY_RUN: would POST {len(rows)} rows")
-        return True
+        return True, ""
 
     status, payload = _TABLES.post_rows(schema, table, rows)
     if status in (200, 201, 202):
         print(f"Uploaded {len(rows)} rows -> status {status}")
-        return True
+        return True, ""
 
     # Surface a sample of the offending row so the cause (e.g. a leaked header
     # row, a type mismatch) is visible. The OEP rejects the whole batch on one
@@ -799,16 +818,24 @@ def _post_rows(schema: str, table: str, rows: list[dict[str, Any]]) -> bool:
         payload,
         json.dumps(snippet, ensure_ascii=False, default=str)[:400],
     )
-    return False
+    return False, f"{status}: {str(payload)[:200]}"
 
 
 # =========================
 # UPLOAD (per table) - REFACTORED
 # =========================
 def upload_table(
-    schema: str, table: str, resources_override: list[Resource] | None = None
-) -> None:
+    schema: str,
+    table: str,
+    resources_override: list[Resource] | None = None,
+    *,
+    strategy: str | None = None,
+) -> TableUploadResult:
+    effective_strategy = strategy or UPLOAD_STRATEGY
+    result = TableUploadResult(schema=schema, table=table)
+
     tabulars = _get_tabular_resources(schema, table, resources_override)
+    result.csv_paths = [t.path for t in tabulars]
     column_names, required_nonnull, serial_pk, coldefs = _get_table_columns(
         schema, table
     )
@@ -818,11 +845,12 @@ def upload_table(
     uploaded_rows = 0
     failed_rows = 0
     failed_batches = 0
+    first_error = ""
 
     # "replace" strategy: clear existing rows once before uploading, so the
     # result is a fresh upload. Abort the table if clearing fails, rather than
     # silently appending onto stale data.
-    if UPLOAD_STRATEGY == "replace":
+    if effective_strategy == "replace":
         if DRY_RUN:
             print(f"DRY_RUN: would clear all rows of {schema}.{table} (replace)")
         else:
@@ -899,11 +927,13 @@ def upload_table(
                 )
                 if not out_rows:
                     continue
-                if _post_rows(schema, table, out_rows):
+                ok, detail = _post_rows(schema, table, out_rows)
+                if ok:
                     uploaded_rows += len(out_rows)
                 else:
                     failed_rows += len(out_rows)
                     failed_batches += 1
+                    first_error = first_error or detail
                 continue
 
             # WIDE
@@ -929,11 +959,18 @@ def upload_table(
                     if not batch:
                         continue
 
-            if _post_rows(schema, table, batch):
+            ok, detail = _post_rows(schema, table, batch)
+            if ok:
                 uploaded_rows += len(batch)
             else:
                 failed_rows += len(batch)
                 failed_batches += 1
+                first_error = first_error or detail
+
+    result.uploaded_rows = uploaded_rows
+    result.failed_rows = failed_rows
+    result.failed_batches = failed_batches
+    result.first_error = first_error
 
     if failed_batches:
         loggi.error(
@@ -946,6 +983,8 @@ def upload_table(
         )
     else:
         print(f"Done: {table} uploaded {uploaded_rows} rows total.")
+
+    return result
 
 
 # =========================
@@ -1010,7 +1049,9 @@ def upload_tables_in_fk_order(
     idents: list[str],
     default_schema: str,
     resources_by_table: dict[str, list[Resource]] | None = None,
-) -> None:
+    *,
+    strategy: str | None = None,
+) -> list[TableUploadResult]:
     ordered_tables = topo_sort_tables(idents, default_schema)
     print("Upload order (parents -> children):", " -> ".join(ordered_tables))
 
@@ -1021,22 +1062,105 @@ def upload_tables_in_fk_order(
     if RESOURCES_BY_TABLE:
         print(f"[override keys] {sorted(RESOURCES_BY_TABLE.keys())}")
 
+    results: list[TableUploadResult] = []
     for t in ordered_tables:
         schema, table = split_ident(t, default_schema)
         override = RESOURCES_BY_TABLE.get(normalize_table_key(table), [])
         print(
             f"[upload] table='{table}' schema='{schema}' override_rows={len(override)}"
         )
-        upload_table(schema, table, resources_override=override)
+        try:
+            results.append(
+                upload_table(
+                    schema, table, resources_override=override, strategy=strategy
+                )
+            )
+        except Exception as e:  # noqa: BLE001 - record and keep going to the next table
+            loggi.exception("Upload aborted for %s.%s: %s", schema, table, e)
+            results.append(
+                TableUploadResult(
+                    schema=schema,
+                    table=table,
+                    failed_batches=1,
+                    first_error=str(e)[:200],
+                )
+            )
+    return results
 
 
 # =========================
-# Entrypoint helper (optional)
+# Failure journal (for retry)
 # =========================
-def upload_tabular_data() -> None:
+def _journal_path() -> Path:
+    raw = FAILURE_LOG or ".oep-upload/last-run.json"
+    p = Path(raw).expanduser()
+    return p if p.is_absolute() else (Path.cwd() / p)
+
+
+def _write_failure_journal(results: list[TableUploadResult]) -> None:
+    """Record failed tables so `retry` can re-upload only those.
+
+    On a fully successful run, remove any stale journal so retry has nothing
+    to do.
+    """
+    path = _journal_path()
+    failed = [r for r in results if not r.ok]
+    if not failed:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as e:  # noqa: BLE001
+            loggi.debug("Could not remove stale failure journal %s: %s", path, e)
+        return
+
+    payload = {
+        "run_at": datetime.now().isoformat(timespec="seconds"),
+        "target": getattr(_s.api, "target", None),
+        "failed": [
+            {
+                "schema": r.schema,
+                "table": r.table,
+                "csv": r.csv_paths,
+                "failed_batches": r.failed_batches,
+                "failed_rows": r.failed_rows,
+                "first_error": r.first_error,
+            }
+            for r in failed
+        ],
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        loggi.warning(
+            "Recorded %d failed table(s) in %s — run 'oep-upload retry' to re-upload them.",
+            len(failed),
+            path,
+        )
+    except OSError as e:  # noqa: BLE001
+        loggi.warning("Could not write failure journal %s: %s", path, e)
+
+
+def _read_failure_journal() -> dict | None:
+    path = _journal_path()
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        loggi.warning("Could not read failure journal %s: %s", path, e)
+        return None
+
+
+# =========================
+# Entrypoint helpers
+# =========================
+def upload_tabular_data() -> list[TableUploadResult]:
     """
     Convenience entry: read datapackage from config/env,
-    derive tables, and upload in FK order.
+    derive tables, and upload in FK order. Records any failures for `retry`.
     """
     oem_path = find_datapackage()
     if oem_path and oem_path.exists():
@@ -1051,4 +1175,55 @@ def upload_tabular_data() -> None:
     if not tables_input:
         raise SystemExit("No tables to upload. Check your OEM file.")
 
-    upload_tables_in_fk_order(tables_input, DEFAULT_SCHEMA, resources_by_table)
+    results = upload_tables_in_fk_order(
+        tables_input, DEFAULT_SCHEMA, resources_by_table
+    )
+    _write_failure_journal(results)
+    return results
+
+
+def retry_failed_uploads(*, strategy: str = "replace") -> list[TableUploadResult]:
+    """Re-upload only the tables recorded as failed in the failure journal.
+
+    Defaults to the ``replace`` strategy (clear each failed table first) so the
+    retry is a clean re-upload rather than appending onto a partial one. The
+    journal is rewritten afterwards with whatever still fails, so you can
+    iterate: fix -> retry -> fix.
+    """
+    journal = _read_failure_journal()
+    if not journal or not journal.get("failed"):
+        loggi.info("Nothing to retry — no failed tables recorded in %s.", _journal_path())
+        return []
+
+    failed_tables = [f.get("table") for f in journal["failed"] if f.get("table")]
+    loggi.info(
+        "Retrying %d failed table(s) with strategy='%s': %s",
+        len(failed_tables),
+        strategy,
+        ", ".join(failed_tables),
+    )
+
+    oem_path = find_datapackage()
+    if not (oem_path and oem_path.exists()):
+        raise SystemExit(
+            "No datapackage found. Set 'paths.datapackage_file' or OEP_OEM_FILE."
+        )
+    resources_by_table = load_oem_resources(oem_path)
+
+    wanted = {normalize_table_key(t) for t in failed_tables}
+    subset = {
+        k: v
+        for k, v in resources_by_table.items()
+        if normalize_table_key(k) in wanted
+    }
+    if not subset:
+        loggi.warning(
+            "None of the failed tables were found in the datapackage; nothing to retry."
+        )
+        return []
+
+    results = upload_tables_in_fk_order(
+        list(subset.keys()), DEFAULT_SCHEMA, subset, strategy=strategy
+    )
+    _write_failure_journal(results)  # rewrite with whatever still failed
+    return results

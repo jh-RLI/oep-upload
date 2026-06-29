@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Retry only the failed uploads**: a partial upload now records the tables that
+  failed to a journal (`upload.failure_log`, default `.oep-upload/last-run.json`),
+  and `oep-upload retry` (or `oep_upload.retry()`) re-uploads **only those tables**
+  — by default with the `replace` strategy so it's a clean re-upload, not an
+  append onto a partial one. The journal is rewritten with whatever still fails,
+  so you can iterate fix → retry → fix; a fully successful run clears it. The row
+  upload also no longer aborts the whole run when one table errors — it records
+  the failure and continues.
 - **Upload verification**: a built-in `verify` feature that compares each table's
   row count on the OEP with the count expected from the local CSVs (pivot-aware:
   wide `from`/`to`/`type` files expand to one row per timestamp × series).

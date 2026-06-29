@@ -108,6 +108,9 @@ class UploadSettings(BaseModel):
     # "append": add rows to whatever is already in the table (default).
     # "replace": clear the table's existing rows first, for a fresh upload.
     strategy: Literal["append", "replace"] = "append"
+    # Where to record which tables failed, so `oep-upload retry` can re-upload
+    # only those. Relative paths are resolved from the working directory.
+    failure_log: str = ".oep-upload/last-run.json"
 
 
 class Settings(BaseSettings):

@@ -221,6 +221,28 @@ a real problem (see troubleshooting). The `--verify-only` flag of
 
 ---
 
+## 7. Retry only what failed
+
+If a run partially fails, the tables that failed are recorded in a journal
+(`.oep-upload/last-run.json`). Fix the data, then re-upload **only those tables**:
+
+```bash
+oep-upload retry            # re-uploads just the failed tables (replace by default)
+```
+
+```python
+import oep_upload
+
+oep_upload.configure(target="local", data_root="data/postprocessed")
+oep_upload.retry()          # only the failed tables; rewrites the journal
+```
+
+It defaults to `replace` (clears each failed table first) so the retry is clean,
+and rewrites the journal with whatever still fails — so you can iterate
+fix → `retry` → fix. A fully successful run clears the journal.
+
+---
+
 ## Troubleshooting (local‑specific)
 
 | Symptom | Likely cause / fix |
