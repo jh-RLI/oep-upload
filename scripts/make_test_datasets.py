@@ -32,7 +32,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
 import random
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -119,8 +118,9 @@ def _name(prefix: str, i: int) -> str:
 # --------------------------------------------------------------------------
 # dataset 1: simple, all types, ~100 rows
 # --------------------------------------------------------------------------
-def gen_simple(out: Path, rows: int = 100) -> None:
+def gen_simple(out: Path, rows: int = 100, prefix: str = "") -> None:
     pkg = out / "simple_all_types"
+    table = f"{prefix}demo"
     fields = [
         _field("id", "bigint", nullable=False, description="primary key (provided)"),
         _field("name", "text"),
@@ -140,10 +140,10 @@ def gen_simple(out: Path, rows: int = 100) -> None:
         pkg,
         "simple_all_types",
         "Simple all-types demo",
-        [_resource("demo", fields)],
+        [_resource(table, fields)],
     )
 
-    fh, w = _writer(pkg / "data" / "demo.csv")
+    fh, w = _writer(pkg / "data" / f"{table}.csv")
     with fh:
         w.writerow([f["name"] for f in fields])
         base = datetime(2024, 1, 1, 0, 0, 0)
@@ -167,14 +167,19 @@ def gen_simple(out: Path, rows: int = 100) -> None:
                     json.dumps(tags, ensure_ascii=False),
                 ]
             )
-    print(f"  wrote {pkg/'data'/'demo.csv'} ({rows} rows)")
+    print(f"  wrote {pkg/'data'/(table + '.csv')} ({rows} rows)")
 
 
 # --------------------------------------------------------------------------
 # dataset 2: energy model, large
 # --------------------------------------------------------------------------
-def gen_complex(out: Path, target_gb: float, n_locations: int, n_plants: int) -> None:
+def gen_complex(
+    out: Path, target_gb: float, n_locations: int, n_plants: int, prefix: str = ""
+) -> None:
     pkg = out / "energy_model"
+    t_loc = f"{prefix}locations"
+    t_plant = f"{prefix}plants"
+    t_prof = f"{prefix}load_profiles"
 
     loc_fields = [
         _field("id", "bigint", nullable=False),
@@ -210,14 +215,14 @@ def gen_complex(out: Path, target_gb: float, n_locations: int, n_plants: int) ->
         "energy_model",
         "Energy model research dataset",
         [
-            _resource("locations", loc_fields),
-            _resource("plants", plant_fields, foreign_keys=[_fk("location_id", "locations")]),
-            _resource("load_profiles", profile_fields, foreign_keys=[_fk("plant_id", "plants")]),
+            _resource(t_loc, loc_fields),
+            _resource(t_plant, plant_fields, foreign_keys=[_fk("location_id", t_loc)]),
+            _resource(t_prof, profile_fields, foreign_keys=[_fk("plant_id", t_plant)]),
         ],
     )
 
     # locations
-    fh, w = _writer(pkg / "data" / "locations.csv")
+    fh, w = _writer(pkg / "data" / f"{t_loc}.csv")
     with fh:
         w.writerow([f["name"] for f in loc_fields])
         for i in range(1, n_locations + 1):
@@ -233,10 +238,10 @@ def gen_complex(out: Path, target_gb: float, n_locations: int, n_plants: int) ->
                     json.dumps(meta, ensure_ascii=False),
                 ]
             )
-    print(f"  wrote locations.csv ({n_locations} rows)")
+    print(f"  wrote {t_loc}.csv ({n_locations} rows)")
 
     # plants
-    fh, w = _writer(pkg / "data" / "plants.csv")
+    fh, w = _writer(pkg / "data" / f"{t_plant}.csv")
     with fh:
         w.writerow([f["name"] for f in plant_fields])
         for i in range(1, n_plants + 1):
@@ -259,12 +264,12 @@ def gen_complex(out: Path, target_gb: float, n_locations: int, n_plants: int) ->
                     json.dumps(attrs, ensure_ascii=False),
                 ]
             )
-    print(f"  wrote plants.csv ({n_plants} rows)")
+    print(f"  wrote {t_plant}.csv ({n_plants} rows)")
 
     # load_profiles — the bulk; stream until the file reaches target size.
     # Hand-format rows (only the json cell needs CSV-quoting) for speed.
     target_bytes = int(target_gb * (1024**3))
-    path = pkg / "data" / "load_profiles.csv"
+    path = pkg / "data" / f"{t_prof}.csv"
     header = "id;plant_id;timestamp;value_mw;quality;meta\n"
     # a small pool of pre-serialized json cells, CSV-quoted, rotated per row
     meta_pool = []
@@ -296,8 +301,8 @@ def gen_complex(out: Path, target_gb: float, n_locations: int, n_plants: int) ->
             buf.clear()
             size += len(chunk.encode("utf-8"))
             written = rid
-            print(f"    load_profiles: {written:,} rows, {size/1024**3:.2f} GB", flush=True)
-    print(f"  wrote load_profiles.csv ({written:,} rows, ~{size/1024**3:.2f} GB)")
+            print(f"    {t_prof}: {written:,} rows, {size/1024**3:.2f} GB", flush=True)
+    print(f"  wrote {t_prof}.csv ({written:,} rows, ~{size/1024**3:.2f} GB)")
 
 
 def main() -> int:
@@ -309,20 +314,25 @@ def main() -> int:
     ap.add_argument("--plants", type=int, default=20000)
     ap.add_argument("--simple-rows", type=int, default=100)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument(
+        "--prefix",
+        default="",
+        help="prefix for table (resource) names, e.g. 'test_' to mark test tables",
+    )
     args = ap.parse_args()
 
     random.seed(args.seed)
     out = Path(args.out).expanduser()
     out.mkdir(parents=True, exist_ok=True)
-    print(f"Output dir: {out}")
+    print(f"Output dir: {out}  (table prefix: {args.prefix!r})")
 
     if args.which in ("both", "simple"):
         print("Generating simple_all_types ...")
-        gen_simple(out, rows=args.simple_rows)
+        gen_simple(out, rows=args.simple_rows, prefix=args.prefix)
 
     if args.which in ("both", "complex"):
         print(f"Generating energy_model (~{args.target_gb} GB) ...")
-        gen_complex(out, args.target_gb, args.locations, args.plants)
+        gen_complex(out, args.target_gb, args.locations, args.plants, prefix=args.prefix)
 
     print("Done.")
     return 0

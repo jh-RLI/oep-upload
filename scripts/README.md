@@ -29,7 +29,14 @@ python scripts/make_test_datasets.py --which complex --target-gb 0.2 --out /tmp/
 
 # tune sizes
 python scripts/make_test_datasets.py --locations 5000 --plants 20000 --seed 42
+
+# prefix table (resource) names — recommended before uploading to a shared/prod
+# OEP so the tables are clearly marked test data and don't collide
+python scripts/make_test_datasets.py --prefix test_
 ```
+
+`--prefix` is applied to every resource (table) name, its CSV file name, and the
+foreign-key references — e.g. `test_locations`, `test_plants`, `test_load_profiles`.
 
 Default output: `D:\Arbeit\OEP\test-data\api-data-upload`
 (`--out` to change). Uses only the Python standard library; deterministic via
