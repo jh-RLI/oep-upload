@@ -7,6 +7,8 @@ import ast
 import gzip
 import bz2
 import lzma
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -38,6 +40,7 @@ RETRY_BASE_DELAY: float = float(_s.upload.retry_base_delay)
 DEFAULT_SCHEMA: str = _s.upload.default_schema
 UPLOAD_STRATEGY: str = _s.upload.strategy  # "append" | "replace"
 FAILURE_LOG: str = _s.upload.failure_log  # where failed tables are recorded
+UPLOAD_CONCURRENCY: int = max(1, int(getattr(_s.upload, "concurrency", 1)))
 
 # Null tokens
 NULL_TOKENS: set[str] = set(map(lambda s: s.lower(), _s.upload.null_tokens))
@@ -798,9 +801,18 @@ def _post_rows(schema: str, table: str, rows: list[dict[str, Any]]) -> tuple[boo
         print(f"DRY_RUN: would POST {len(rows)} rows")
         return True, ""
 
+    t0 = time.perf_counter()
     status, payload = _TABLES.post_rows(schema, table, rows)
+    dt = time.perf_counter() - t0
     if status in (200, 201, 202):
-        print(f"Uploaded {len(rows)} rows -> status {status}")
+        rate = (len(rows) / dt) if dt > 0 else 0.0
+        loggi.info(
+            "Uploaded %d rows -> status %s in %.1fs (%.0f rows/s)",
+            len(rows),
+            status,
+            dt,
+            rate,
+        )
         return True, ""
 
     # Surface a sample of the offending row so the cause (e.g. a leaked header
@@ -822,51 +834,62 @@ def _post_rows(schema: str, table: str, rows: list[dict[str, Any]]) -> tuple[boo
 
 
 # =========================
-# UPLOAD (per table) - REFACTORED
+# BATCH PRODUCER + POSTERS
 # =========================
-def upload_table(
-    schema: str,
+def _id_missing_message(
     table: str,
-    resources_override: list[Resource] | None = None,
-    *,
-    strategy: str | None = None,
-) -> TableUploadResult:
-    effective_strategy = strategy or UPLOAD_STRATEGY
-    result = TableUploadResult(schema=schema, table=table)
+    serial_pk: bool,
+    column_names: list[str],
+    sample_row: dict[str, Any] | None,
+) -> str | None:
+    """Warning text if the table auto-generates `id` but the data has none.
 
-    tabulars = _get_tabular_resources(schema, table, resources_override)
-    result.csv_paths = [t.path for t in tabulars]
-    column_names, required_nonnull, serial_pk, coldefs = _get_table_columns(
-        schema, table
+    `convert_row_passthrough` drops a missing/empty `id` for a serial primary
+    key, so an absent `id` in a mapped row means the OEP will assign a new one.
+    Returns None when there is nothing to warn about.
+    """
+    if not (serial_pk and "id" in column_names):
+        return None
+    if not sample_row or "id" in sample_row:
+        return None
+    extra = (
+        " (and their order is non-deterministic with concurrency > 1)"
+        if UPLOAD_CONCURRENCY > 1
+        else ""
     )
-    shape = _infer_shape(column_names)
-    db_cols_set = set(column_names)
+    return (
+        f"{table}: the data provides no 'id' values but the table has an "
+        f"auto-generated 'id' (serial primary key) — the OEP will assign NEW ids, "
+        f"so your local ids are NOT preserved{extra}."
+    )
 
-    uploaded_rows = 0
-    failed_rows = 0
-    failed_batches = 0
-    first_error = ""
 
-    # "replace" strategy: clear existing rows once before uploading, so the
-    # result is a fresh upload. Abort the table if clearing fails, rather than
-    # silently appending onto stale data.
-    if effective_strategy == "replace":
-        if DRY_RUN:
-            print(f"DRY_RUN: would clear all rows of {schema}.{table} (replace)")
-        else:
-            loggi.info("Strategy 'replace': clearing existing rows of %s ...", table)
-            status, payload = _TABLES.delete_all_rows(schema, table)
-            if status not in (200, 201, 202, 204):
-                raise RuntimeError(
-                    f"Could not clear table '{table}' for a replace upload: "
-                    f"{status} {payload}"
-                )
-            loggi.info("Cleared existing rows of %s (status %s).", table, status)
+def _iter_ready_batches(
+    table: str,
+    tabulars: list[Resource],
+    *,
+    column_names: list[str],
+    required_nonnull: set[str],
+    serial_pk: bool,
+    shape: "TableShape",
+    coldefs: dict[str, dict],
+    db_cols_set: set[str],
+) -> Iterable[list[dict[str, Any]]]:
+    """Yield batches of rows ready to POST (header detection + pivot/wide mapping).
 
-    if len(tabulars) > 1:
-        print(
-            f"Note: multiple tabular paths found for {table}: {[t.path for t in tabulars]}"
-        )
+    This is the CPU/producer side; posting happens in the caller so it can run
+    sequentially or in parallel without changing this logic.
+    """
+    id_warned = False
+
+    def _warn_id(rows: list[dict[str, Any]]) -> None:
+        nonlocal id_warned
+        if id_warned:
+            return
+        msg = _id_missing_message(table, serial_pk, column_names, rows[0] if rows else None)
+        if msg:
+            loggi.warning(msg)
+        id_warned = True
 
     for res in tabulars:
         csv_path = resolve_csv_path(res.path)
@@ -925,15 +948,9 @@ def upload_table(
                 out_rows = _emit_long_rows(
                     raw_batch, header_ctx, shape, db_cols_set=db_cols_set
                 )
-                if not out_rows:
-                    continue
-                ok, detail = _post_rows(schema, table, out_rows)
-                if ok:
-                    uploaded_rows += len(out_rows)
-                else:
-                    failed_rows += len(out_rows)
-                    failed_batches += 1
-                    first_error = first_error or detail
+                if out_rows:
+                    _warn_id(out_rows)
+                    yield out_rows
                 continue
 
             # WIDE
@@ -956,16 +973,135 @@ def upload_table(
                         csv_path.name,
                     )
                     batch = batch[1:]
-                    if not batch:
-                        continue
 
-            ok, detail = _post_rows(schema, table, batch)
+            if batch:
+                _warn_id(batch)
+                yield batch
+
+
+def _post_batches_sequential(
+    schema: str, table: str, batches: Iterable[list[dict[str, Any]]]
+) -> tuple[int, int, int, str]:
+    uploaded = failed_rows = failed_batches = 0
+    first_error = ""
+    for batch in batches:
+        ok, detail = _post_rows(schema, table, batch)
+        if ok:
+            uploaded += len(batch)
+        else:
+            failed_rows += len(batch)
+            failed_batches += 1
+            first_error = first_error or detail
+    return uploaded, failed_rows, failed_batches, first_error
+
+
+def _post_batches_concurrent(
+    schema: str,
+    table: str,
+    batches: Iterable[list[dict[str, Any]]],
+    concurrency: int,
+) -> tuple[int, int, int, str]:
+    """POST batches with up to `concurrency` requests in flight at once.
+
+    The producer (mapping) runs in this thread; only the HTTP POST runs in
+    workers, so preparing the next batch overlaps waiting on the previous one.
+    """
+    uploaded = failed_rows = failed_batches = 0
+    first_error = ""
+    inflight: set = set()
+
+    def _do(rows: list[dict[str, Any]]):
+        ok, detail = _post_rows(schema, table, rows)
+        return ok, detail, len(rows)
+
+    def _consume(futs):
+        nonlocal uploaded, failed_rows, failed_batches, first_error
+        for fut in futs:
+            ok, detail, n = fut.result()
             if ok:
-                uploaded_rows += len(batch)
+                uploaded += n
             else:
-                failed_rows += len(batch)
+                failed_rows += n
                 failed_batches += 1
                 first_error = first_error or detail
+
+    with ThreadPoolExecutor(max_workers=concurrency) as ex:
+        for batch in batches:
+            inflight.add(ex.submit(_do, batch))
+            if len(inflight) >= concurrency:
+                done, inflight = wait(inflight, return_when=FIRST_COMPLETED)
+                _consume(done)
+        if inflight:
+            done, _ = wait(inflight)
+            _consume(done)
+
+    return uploaded, failed_rows, failed_batches, first_error
+
+
+# =========================
+# UPLOAD (per table) - REFACTORED
+# =========================
+def upload_table(
+    schema: str,
+    table: str,
+    resources_override: list[Resource] | None = None,
+    *,
+    strategy: str | None = None,
+) -> TableUploadResult:
+    effective_strategy = strategy or UPLOAD_STRATEGY
+    result = TableUploadResult(schema=schema, table=table)
+
+    tabulars = _get_tabular_resources(schema, table, resources_override)
+    result.csv_paths = [t.path for t in tabulars]
+    column_names, required_nonnull, serial_pk, coldefs = _get_table_columns(
+        schema, table
+    )
+    shape = _infer_shape(column_names)
+    db_cols_set = set(column_names)
+
+    # "replace" strategy: clear existing rows once before uploading, so the
+    # result is a fresh upload. Abort the table if clearing fails, rather than
+    # silently appending onto stale data.
+    if effective_strategy == "replace":
+        if DRY_RUN:
+            print(f"DRY_RUN: would clear all rows of {schema}.{table} (replace)")
+        else:
+            loggi.info("Strategy 'replace': clearing existing rows of %s ...", table)
+            status, payload = _TABLES.delete_all_rows(schema, table)
+            if status not in (200, 201, 202, 204):
+                raise RuntimeError(
+                    f"Could not clear table '{table}' for a replace upload: "
+                    f"{status} {payload}"
+                )
+            loggi.info("Cleared existing rows of %s (status %s).", table, status)
+
+    if len(tabulars) > 1:
+        print(
+            f"Note: multiple tabular paths found for {table}: {[t.path for t in tabulars]}"
+        )
+
+    batches = _iter_ready_batches(
+        table,
+        tabulars,
+        column_names=column_names,
+        required_nonnull=required_nonnull,
+        serial_pk=serial_pk,
+        shape=shape,
+        coldefs=coldefs,
+        db_cols_set=db_cols_set,
+    )
+
+    t0 = time.perf_counter()
+    if UPLOAD_CONCURRENCY > 1 and not DRY_RUN:
+        uploaded_rows, failed_rows, failed_batches, first_error = (
+            _post_batches_concurrent(schema, table, batches, UPLOAD_CONCURRENCY)
+        )
+    else:
+        uploaded_rows, failed_rows, failed_batches, first_error = (
+            _post_batches_sequential(schema, table, batches)
+        )
+    elapsed = time.perf_counter() - t0
+    rate = (uploaded_rows / elapsed) if elapsed > 0 else 0.0
 
     result.uploaded_rows = uploaded_rows
     result.failed_rows = failed_rows
@@ -974,15 +1110,25 @@ def upload_table(
 
     if failed_batches:
         loggi.error(
-            "Done: %s — %d rows uploaded, but %d batch(es) (%d rows) FAILED and "
-            "were NOT uploaded. See the 'POST FAILED' messages above.",
+            "Done: %s — %d rows uploaded in %.1fs (%.0f rows/s, concurrency=%d), "
+            "but %d batch(es) (%d rows) FAILED. See the 'POST FAILED' messages above.",
             table,
             uploaded_rows,
+            elapsed,
+            rate,
+            UPLOAD_CONCURRENCY,
             failed_batches,
             failed_rows,
         )
     else:
-        print(f"Done: {table} uploaded {uploaded_rows} rows total.")
+        loggi.info(
+            "Done: %s uploaded %d rows in %.1fs (%.0f rows/s, concurrency=%d).",
+            table,
+            uploaded_rows,
+            elapsed,
+            rate,
+            UPLOAD_CONCURRENCY,
+        )
 
     return result
 

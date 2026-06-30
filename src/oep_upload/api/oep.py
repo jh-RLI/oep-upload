@@ -25,6 +25,7 @@ class OEPApiClient:
     password: Optional[str] = None
     max_retries: int = 3
     retry_base_delay: float = 1.5
+    pool_maxsize: int = 10  # urllib3 connection pool size (raise for concurrency)
 
     # Runtime attrs must be declared when using slots=True
     session: requests.Session = field(init=False, repr=False)
@@ -37,6 +38,14 @@ class OEPApiClient:
         if self.token:
             headers["Authorization"] = f"Token {self.token}"
         self.session.headers.update(headers)
+
+        # Size the connection pool so concurrent uploads don't block on / discard
+        # connections (urllib3's pool is thread-safe; requests.Session shares it).
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=self.pool_maxsize, pool_maxsize=self.pool_maxsize
+        )
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
 
         if self.username and self.password:
             self.auth = HTTPBasicAuth(self.username, self.password)
@@ -116,6 +125,7 @@ class OEPApiClient:
 
         maxr = int(getattr(getattr(s, "upload", None), "max_retries", 3))
         base_delay = float(getattr(getattr(s, "upload", None), "retry_base_delay", 1.5))
+        concurrency = int(getattr(getattr(s, "upload", None), "concurrency", 1))
 
         return cls(
             base_url=base,
@@ -125,6 +135,7 @@ class OEPApiClient:
             password=pwd,
             max_retries=maxr,
             retry_base_delay=base_delay,
+            pool_maxsize=max(10, concurrency),
         )
 
 

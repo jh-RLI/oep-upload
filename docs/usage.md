@@ -74,7 +74,10 @@ Rules that make the upload succeed:
 - **Names** — letters, digits and `_` only; keep table and column names under
   50 characters (longer names are auto-truncated).
 - **Primary key** — only a column literally named `id` can be the primary key.
-  If you don't have one, the OEP adds it automatically.
+  If you don't have one, the OEP adds it automatically. **IDs are only preserved if
+  your CSV actually contains an `id` column with values;** otherwise the OEP assigns
+  new ones (and their order is non-deterministic with `concurrency > 1`). The upload
+  logs a **warning** when a table auto-generates `id` but your data provides none.
 - **Foreign keys** must reference a column in a table that also exists in your
   datapackage.
 - **No `"any"` data types** — that means a column holds mixed types and the upload
@@ -187,7 +190,22 @@ app:
   log_file: logs/         # file path appends; a directory = one file per run
 upload:
   strategy: replace       # append (default) | replace
+  concurrency: 4          # upload N batches in parallel (1 = sequential, default)
+  # batch_size: 5000      # rows per request (default 5000)
 ```
+
+> [!tip] Speeding up slow uploads
+> Uploads are network/server-bound. Raising `concurrency` (try 4–8) overlaps the
+> per-batch wait and is usually the biggest win. The logs now report per-batch and
+> per-table **rows/s** so you can tune by measurement. Don't set concurrency too
+> high — the OEP is synchronous with limited workers, so a handful of parallel
+> requests is the sweet spot.
+
+> [!warning] Mind the memory
+> Roughly **`batch_size × concurrency`** rows (plus their JSON) are held in memory
+> at once. The default `batch_size` (5000) is a safe laptop value; only raise it for
+> narrow tables and lower it for very wide ones. If you bump both `batch_size` and
+> `concurrency`, watch RAM — e.g. `20000 × 4` can be hundreds of MB for wide tables.
 
 > [!warning]
 > `replace` deletes all existing rows of each uploaded table before inserting.

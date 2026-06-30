@@ -105,6 +105,10 @@ class UploadSettings(BaseModel):
     max_retries: int = 5
     retry_base_delay: float = 1.5
     null_tokens: List[str] = ["", "null", "none", "na", "nan", "n/a"]
+    # Number of batches to POST in parallel per table. 1 = sequential (default,
+    # unchanged behavior). Higher overlaps network/server wait — try 4-8. The
+    # OEP is synchronous with limited workers, so don't go overboard.
+    concurrency: int = 1
     # "append": add rows to whatever is already in the table (default).
     # "replace": clear the table's existing rows first, for a fresh upload.
     strategy: Literal["append", "replace"] = "append"
